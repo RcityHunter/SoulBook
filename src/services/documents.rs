@@ -1,6 +1,6 @@
 use chrono::Utc;
 use std::sync::Arc;
-use surrealdb::{engine::remote::ws::Client, types::RecordId as Thing, Surreal};
+use surrealdb::types::RecordId as Thing;
 use validator::Validate;
 
 use crate::{
@@ -36,10 +36,20 @@ impl DocumentService {
     fn document_select_fields() -> &'static str {
         "string::replace(type::string(id), 'document:', '') AS id, \
          string::replace(type::string(space_id), 'space:', '') AS space_id, \
-         title, slug, content, excerpt, is_public, \
+         title, slug, content, excerpt, is_public, status, \
          (IF parent_id = NONE THEN NONE ELSE string::replace(type::string(parent_id), 'document:', '') END) AS parent_id, \
          order_index, author_id, last_editor_id, view_count, word_count, reading_time, \
-         metadata, updated_by, is_deleted, deleted_at, deleted_by, created_at, updated_at"
+         (metadata ?? {}) AS metadata, updated_by, is_deleted, deleted_at, deleted_by, created_at, updated_at"
+    }
+
+    fn normalize_status(status: Option<&str>, is_public: bool) -> String {
+        match status {
+            Some("published") => "published".to_string(),
+            Some("archived") => "archived".to_string(),
+            Some("draft") => "draft".to_string(),
+            _ if is_public => "published".to_string(),
+            _ => "draft".to_string(),
+        }
     }
 
     fn map_document_write_error(err: surrealdb::Error) -> ApiError {
@@ -215,6 +225,8 @@ impl DocumentService {
         // 处理Markdown内容
         let content = request.content.as_deref().unwrap_or("");
         let processed = self.markdown_processor.process(content).await?;
+        let is_public = request.is_public.unwrap_or(false);
+        let status = Self::normalize_status(request.status.as_deref(), is_public);
 
         // 使用 SurrealQL 创建记录 - 不设置 metadata，让它使用默认值
         let query = if request.parent_id.is_some() {
@@ -229,6 +241,9 @@ impl DocumentService {
                     word_count = $word_count,
                     reading_time = $reading_time,
                     is_public = $is_public,
+                    is_deleted = false,
+                    status = $status,
+                    view_count = 0,
                     parent_id = type::record($parent_id),
                     order_index = $order_index
             "#
@@ -244,6 +259,9 @@ impl DocumentService {
                     word_count = $word_count,
                     reading_time = $reading_time,
                     is_public = $is_public,
+                    is_deleted = false,
+                    status = $status,
+                    view_count = 0,
                     parent_id = NONE,
                     order_index = $order_index
             "#
@@ -259,7 +277,8 @@ impl DocumentService {
             .bind(("excerpt", processed.excerpt.clone()))
             .bind(("word_count", processed.word_count))
             .bind(("reading_time", processed.reading_time))
-            .bind(("is_public", request.is_public.unwrap_or(false)))
+            .bind(("is_public", is_public))
+            .bind(("status", status))
             .bind(("order_index", request.order_index.unwrap_or(0)));
 
         if let Some(parent_id) = &request.parent_id {
@@ -275,13 +294,18 @@ impl DocumentService {
             .await
             .map_err(Self::map_document_write_error)?;
 
-        let created: Vec<Document> = result
+        // Consume the raw CREATE result (RecordId fields can't deserialize directly as String)
+        let _: Vec<serde_json::Value> = result
             .take(0)
             .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
 
-        let created_document = created.into_iter().next().ok_or_else(|| {
-            ApiError::InternalServerError("Failed to create document".to_string())
-        })?;
+        // Fetch the created document using the proper SELECT with string field transformations
+        let created_document = self
+            .get_document_by_slug(actual_space_id, &request.slug)
+            .await
+            .map_err(|e| {
+                ApiError::InternalServerError(format!("Failed to retrieve created document: {}", e))
+            })?;
 
         // 更新搜索索引
         if let Some(search_service) = &self.search_service {
@@ -359,6 +383,20 @@ impl DocumentService {
             document.is_public = is_public;
         }
 
+        if let Some(status) = request.status {
+            document.status = Some(Self::normalize_status(Some(&status), document.is_public));
+            document.is_public = document.status.as_deref() == Some("published");
+        } else if request.is_public.is_some() {
+            document.status = Some(Self::normalize_status(
+                document.status.as_deref(),
+                document.is_public,
+            ));
+        }
+
+        if let Some(metadata) = request.metadata {
+            document.metadata = metadata;
+        }
+
         document.updated_by = Some(editor_id.to_string());
         document.updated_at = Some(chrono::Utc::now());
 
@@ -370,6 +408,8 @@ impl DocumentService {
                     content = $content,
                     excerpt = $excerpt,
                     is_public = $is_public,
+                    status = $status,
+                    metadata = $metadata,
                     word_count = $word_count,
                     reading_time = $reading_time,
                     updated_by = $updated_by,
@@ -387,6 +427,14 @@ impl DocumentService {
             .bind(("content", document.content.clone()))
             .bind(("excerpt", document.excerpt.clone()))
             .bind(("is_public", document.is_public))
+            .bind((
+                "status",
+                document
+                    .status
+                    .clone()
+                    .unwrap_or_else(|| "draft".to_string()),
+            ))
+            .bind(("metadata", document.metadata.clone()))
             .bind(("word_count", document.word_count))
             .bind(("reading_time", document.reading_time))
             .bind(("updated_by", document.updated_by.clone()))
@@ -594,6 +642,7 @@ impl DocumentService {
                     id: doc_id.clone(),
                     title: doc.title.clone(),
                     slug: doc.slug.clone(),
+                    status: doc.status.clone(),
                     is_public: doc.is_public,
                     order_index: doc.order_index,
                     children: Vec::new(),

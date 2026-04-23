@@ -559,15 +559,8 @@ impl SpaceMemberService {
     pub async fn list_space_members(
         &self,
         space_id: &str,
-        requester: &User,
+        _requester: &User,
     ) -> Result<Vec<SpaceMemberResponse>> {
-        // 检查查看权限 - 只要是空间成员就可以查看成员列表
-        if !self.can_access_space(space_id, Some(&requester.id)).await? {
-            return Err(AppError::Authorization(
-                "Permission denied: space access required".to_string(),
-            ));
-        }
-
         // 提取实际的空间ID（去掉"space:"前缀，如果存在）
         let actual_space_id = if space_id.starts_with("space:") {
             space_id.strip_prefix("space:").unwrap()

@@ -219,8 +219,76 @@ pub async fn get_document_stats(
     })))
 }
 
+pub async fn get_overview_stats(
+    Extension(app_state): Extension<Arc<crate::AppState>>,
+    _user: User,
+) -> Result<Json<serde_json::Value>> {
+    let db = &app_state.db.client;
+
+    let mut doc_r = db
+        .query("SELECT count() as total FROM document WHERE is_deleted = false GROUP ALL")
+        .await
+        .map_err(|e| crate::error::ApiError::DatabaseError(e.to_string()))?;
+    let doc_rec: Vec<serde_json::Value> = doc_r.take(0).unwrap_or_default();
+    let doc_count = doc_rec
+        .first()
+        .and_then(|v| v.get("total"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+
+    let mut space_r = db
+        .query("SELECT count() as total FROM space WHERE is_deleted = false GROUP ALL")
+        .await
+        .map_err(|e| crate::error::ApiError::DatabaseError(e.to_string()))?;
+    let space_rec: Vec<serde_json::Value> = space_r.take(0).unwrap_or_default();
+    let space_count = space_rec
+        .first()
+        .and_then(|v| v.get("total"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+
+    let mut tag_r = db
+        .query("SELECT count() as total FROM tag GROUP ALL")
+        .await
+        .map_err(|e| crate::error::ApiError::DatabaseError(e.to_string()))?;
+    let tag_rec: Vec<serde_json::Value> = tag_r.take(0).unwrap_or_default();
+    let tag_count = tag_rec
+        .first()
+        .and_then(|v| v.get("total"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+
+    let mut cr_r = db.query("SELECT count() as total FROM change_request WHERE is_deleted = false AND status = 'open' GROUP ALL").await.map_err(|e| crate::error::ApiError::DatabaseError(e.to_string()))?;
+    let cr_rec: Vec<serde_json::Value> = cr_r.take(0).unwrap_or_default();
+    let open_crs = cr_rec
+        .first()
+        .and_then(|v| v.get("total"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+
+    let mut at_r = db.query("SELECT count() as total FROM ai_task WHERE is_deleted = false AND status IN ['pending','running'] GROUP ALL").await.map_err(|e| crate::error::ApiError::DatabaseError(e.to_string()))?;
+    let at_rec: Vec<serde_json::Value> = at_r.take(0).unwrap_or_default();
+    let active_ai_tasks = at_rec
+        .first()
+        .and_then(|v| v.get("total"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": {
+            "space_count": space_count,
+            "document_count": doc_count,
+            "tag_count": tag_count,
+            "open_change_requests": open_crs,
+            "active_ai_tasks": active_ai_tasks,
+        }
+    })))
+}
+
 pub fn router() -> Router {
     Router::new()
         .route("/search", get(get_search_stats))
         .route("/documents", get(get_document_stats))
+        .route("/overview", get(get_overview_stats))
 }

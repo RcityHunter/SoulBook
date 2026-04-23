@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, Query},
     http::StatusCode,
     response::Json,
     routing::{delete, get, post, put},
@@ -13,7 +13,7 @@ use crate::{
     models::tag::{CreateTagRequest, DocumentTag, Tag, TagDocumentRequest, UpdateTagRequest},
     services::database::record_id_to_string,
     services::{
-        auth::AuthService,
+        auth::User,
         tags::{TagService, TagStatistics},
     },
 };
@@ -59,18 +59,19 @@ pub struct TagDocumentsResponse {
 pub async fn get_tags(
     Query(query): Query<TagQuery>,
     Extension(app_state): Extension<Arc<crate::AppState>>,
-    Extension(user_id): Extension<String>,
-) -> Result<Json<TagListResponse>, ApiError> {
+    user: User,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let user_id = &user.id;
     let tag_service = &app_state.tag_service;
     let auth_service = &app_state.auth_service;
     // 检查读取权限
     if let Some(space_id) = &query.space_id {
         auth_service
-            .check_permission(&user_id, "docs.read", Some(space_id))
+            .check_permission(user_id, "docs.read", Some(space_id))
             .await?;
     } else {
         auth_service
-            .check_permission(&user_id, "docs.read", None)
+            .check_permission(user_id, "docs.read", None)
             .await?;
     }
 
@@ -91,42 +92,50 @@ pub async fn get_tags(
     let total_count = tags.len() as i64;
     let total_pages = (total_count + per_page - 1) / per_page;
 
-    Ok(Json(TagListResponse {
-        tags,
-        total_count,
-        page,
-        per_page,
-        total_pages,
-    }))
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": {
+            "tags": tags,
+            "total_count": total_count,
+            "page": page,
+            "per_page": per_page,
+            "total_pages": total_pages
+        }
+    })))
 }
 
 pub async fn create_tag(
     Extension(app_state): Extension<Arc<crate::AppState>>,
-    Extension(user_id): Extension<String>,
+    user: User,
     Json(request): Json<CreateTagRequest>,
-) -> Result<Json<Tag>, ApiError> {
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let user_id = &user.id;
     let tag_service = &app_state.tag_service;
     let auth_service = &app_state.auth_service;
     // 检查创建权限
     if let Some(space_id) = &request.space_id {
         auth_service
-            .check_permission(&user_id, "docs.tag.create", Some(space_id))
+            .check_permission(user_id, "docs.tag.create", Some(space_id))
             .await?;
     } else {
         auth_service
-            .check_permission(&user_id, "docs.admin", None)
+            .check_permission(user_id, "docs.admin", None)
             .await?;
     }
 
-    let tag = tag_service.create_tag(&user_id, request).await?;
-    Ok(Json(tag))
+    let tag = tag_service.create_tag(user_id, request).await?;
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": tag
+    })))
 }
 
 pub async fn get_tag(
     Path(tag_id): Path<String>,
     Extension(app_state): Extension<Arc<crate::AppState>>,
-    Extension(user_id): Extension<String>,
-) -> Result<Json<Tag>, ApiError> {
+    user: User,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let user_id = &user.id;
     let tag_service = &app_state.tag_service;
     let auth_service = &app_state.auth_service;
     let tag = tag_service.get_tag(&tag_id).await?;
@@ -134,23 +143,27 @@ pub async fn get_tag(
     // 检查读取权限
     if let Some(space_id) = &tag.space_id {
         auth_service
-            .check_permission(&user_id, "docs.read", Some(&record_id_to_string(space_id)))
+            .check_permission(user_id, "docs.read", Some(&record_id_to_string(space_id)))
             .await?;
     } else {
         auth_service
-            .check_permission(&user_id, "docs.read", None)
+            .check_permission(user_id, "docs.read", None)
             .await?;
     }
 
-    Ok(Json(tag))
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": tag
+    })))
 }
 
 pub async fn update_tag(
     Path(tag_id): Path<String>,
     Extension(app_state): Extension<Arc<crate::AppState>>,
-    Extension(user_id): Extension<String>,
+    user: User,
     Json(request): Json<UpdateTagRequest>,
-) -> Result<Json<Tag>, ApiError> {
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let user_id = &user.id;
     let tag_service = &app_state.tag_service;
     let auth_service = &app_state.auth_service;
     let tag = tag_service.get_tag(&tag_id).await?;
@@ -159,26 +172,30 @@ pub async fn update_tag(
     if let Some(space_id) = &tag.space_id {
         auth_service
             .check_permission(
-                &user_id,
+                user_id,
                 "docs.tag.update",
                 Some(&record_id_to_string(space_id)),
             )
             .await?;
     } else {
         auth_service
-            .check_permission(&user_id, "docs.admin", None)
+            .check_permission(user_id, "docs.admin", None)
             .await?;
     }
 
-    let updated_tag = tag_service.update_tag(&tag_id, &user_id, request).await?;
-    Ok(Json(updated_tag))
+    let updated_tag = tag_service.update_tag(&tag_id, user_id, request).await?;
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": updated_tag
+    })))
 }
 
 pub async fn delete_tag(
     Path(tag_id): Path<String>,
     Extension(app_state): Extension<Arc<crate::AppState>>,
-    Extension(user_id): Extension<String>,
+    user: User,
 ) -> Result<StatusCode, ApiError> {
+    let user_id = &user.id;
     let tag_service = &app_state.tag_service;
     let auth_service = &app_state.auth_service;
     let tag = tag_service.get_tag(&tag_id).await?;
@@ -187,14 +204,14 @@ pub async fn delete_tag(
     if let Some(space_id) = &tag.space_id {
         auth_service
             .check_permission(
-                &user_id,
+                user_id,
                 "docs.tag.delete",
                 Some(&record_id_to_string(space_id)),
             )
             .await?;
     } else {
         auth_service
-            .check_permission(&user_id, "docs.admin", None)
+            .check_permission(user_id, "docs.admin", None)
             .await?;
     }
 
@@ -205,18 +222,19 @@ pub async fn delete_tag(
 pub async fn get_popular_tags(
     Query(query): Query<PopularTagsQuery>,
     Extension(app_state): Extension<Arc<crate::AppState>>,
-    Extension(user_id): Extension<String>,
-) -> Result<Json<Vec<Tag>>, ApiError> {
+    user: User,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let user_id = &user.id;
     let tag_service = &app_state.tag_service;
     let auth_service = &app_state.auth_service;
     // 检查读取权限
     if let Some(space_id) = &query.space_id {
         auth_service
-            .check_permission(&user_id, "docs.read", Some(space_id))
+            .check_permission(user_id, "docs.read", Some(space_id))
             .await?;
     } else {
         auth_service
-            .check_permission(&user_id, "docs.read", None)
+            .check_permission(user_id, "docs.read", None)
             .await?;
     }
 
@@ -225,35 +243,40 @@ pub async fn get_popular_tags(
         .get_popular_tags(query.space_id.as_deref(), limit)
         .await?;
 
-    Ok(Json(tags))
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": tags
+    })))
 }
 
 pub async fn tag_document(
     Extension(app_state): Extension<Arc<crate::AppState>>,
-    Extension(user_id): Extension<String>,
+    user: User,
     Json(request): Json<TagDocumentRequest>,
 ) -> Result<Json<Vec<DocumentTag>>, ApiError> {
+    let user_id = &user.id;
     let tag_service = &app_state.tag_service;
     let auth_service = &app_state.auth_service;
     // 检查文档标签权限
     auth_service
-        .check_permission(&user_id, "docs.tag.manage", Some(&request.document_id))
+        .check_permission(user_id, "docs.tag.manage", Some(&request.document_id))
         .await?;
 
-    let document_tags = tag_service.tag_document(&user_id, request).await?;
+    let document_tags = tag_service.tag_document(user_id, request).await?;
     Ok(Json(document_tags))
 }
 
 pub async fn untag_document(
     Path((document_id, tag_id)): Path<(String, String)>,
     Extension(app_state): Extension<Arc<crate::AppState>>,
-    Extension(user_id): Extension<String>,
+    user: User,
 ) -> Result<StatusCode, ApiError> {
+    let user_id = &user.id;
     let tag_service = &app_state.tag_service;
     let auth_service = &app_state.auth_service;
     // 检查文档标签权限
     auth_service
-        .check_permission(&user_id, "docs.tag.manage", Some(&document_id))
+        .check_permission(user_id, "docs.tag.manage", Some(&document_id))
         .await?;
 
     tag_service.untag_document(&document_id, &tag_id).await?;
@@ -263,13 +286,14 @@ pub async fn untag_document(
 pub async fn get_document_tags(
     Path(document_id): Path<String>,
     Extension(app_state): Extension<Arc<crate::AppState>>,
-    Extension(user_id): Extension<String>,
+    user: User,
 ) -> Result<Json<DocumentTagsResponse>, ApiError> {
+    let user_id = &user.id;
     let tag_service = &app_state.tag_service;
     let auth_service = &app_state.auth_service;
     // 检查文档读取权限
     auth_service
-        .check_permission(&user_id, "docs.read", Some(&document_id))
+        .check_permission(user_id, "docs.read", Some(&document_id))
         .await?;
 
     let tags = tag_service.get_document_tags(&document_id).await?;
@@ -281,8 +305,9 @@ pub async fn get_documents_by_tag(
     Path(tag_id): Path<String>,
     Query(query): Query<TagQuery>,
     Extension(app_state): Extension<Arc<crate::AppState>>,
-    Extension(user_id): Extension<String>,
+    user: User,
 ) -> Result<Json<TagDocumentsResponse>, ApiError> {
+    let user_id = &user.id;
     let tag_service = &app_state.tag_service;
     let auth_service = &app_state.auth_service;
     let tag = tag_service.get_tag(&tag_id).await?;
@@ -290,11 +315,11 @@ pub async fn get_documents_by_tag(
     // 检查标签读取权限
     if let Some(space_id) = &tag.space_id {
         auth_service
-            .check_permission(&user_id, "docs.read", Some(&record_id_to_string(space_id)))
+            .check_permission(user_id, "docs.read", Some(&record_id_to_string(space_id)))
             .await?;
     } else {
         auth_service
-            .check_permission(&user_id, "docs.read", None)
+            .check_permission(user_id, "docs.read", None)
             .await?;
     }
 
@@ -320,18 +345,19 @@ pub async fn get_documents_by_tag(
 pub async fn get_tag_statistics(
     Query(query): Query<TagQuery>,
     Extension(app_state): Extension<Arc<crate::AppState>>,
-    Extension(user_id): Extension<String>,
+    user: User,
 ) -> Result<Json<TagStatistics>, ApiError> {
+    let user_id = &user.id;
     let tag_service = &app_state.tag_service;
     let auth_service = &app_state.auth_service;
     // 检查统计查看权限
     if let Some(space_id) = &query.space_id {
         auth_service
-            .check_permission(&user_id, "docs.read", Some(space_id))
+            .check_permission(user_id, "docs.read", Some(space_id))
             .await?;
     } else {
         auth_service
-            .check_permission(&user_id, "docs.read", None)
+            .check_permission(user_id, "docs.read", None)
             .await?;
     }
 
@@ -345,18 +371,19 @@ pub async fn get_tag_statistics(
 pub async fn suggest_tags(
     Query(query): Query<TagQuery>,
     Extension(app_state): Extension<Arc<crate::AppState>>,
-    Extension(user_id): Extension<String>,
+    user: User,
 ) -> Result<Json<Vec<Tag>>, ApiError> {
+    let user_id = &user.id;
     let tag_service = &app_state.tag_service;
     let auth_service = &app_state.auth_service;
     // 检查读取权限
     if let Some(space_id) = &query.space_id {
         auth_service
-            .check_permission(&user_id, "docs.read", Some(space_id))
+            .check_permission(user_id, "docs.read", Some(space_id))
             .await?;
     } else {
         auth_service
-            .check_permission(&user_id, "docs.read", None)
+            .check_permission(user_id, "docs.read", None)
             .await?;
     }
 

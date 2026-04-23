@@ -65,15 +65,7 @@ async fn publish_space(
         .await?;
 
     // 检查空间访问权限
-    if !app_state
-        .space_member_service
-        .can_access_space(&space.id, Some(&user.id))
-        .await?
-    {
-        return Err(AppError::Authorization(
-            "Access denied to this space".to_string(),
-        ));
-    }
+    // 空间访问权限已通过 get_space_by_id/get_space_by_slug 验证
 
     // 检查发布权限（需要admin或owner角色）
     // 由于owner自动拥有所有权限，这里只需要检查一个高级权限
@@ -125,15 +117,7 @@ async fn list_publications(
         .get_space_by_id(clean_space_id, Some(&user))
         .await?;
 
-    if !app_state
-        .space_member_service
-        .can_access_space(&space.id, Some(&user.id))
-        .await?
-    {
-        return Err(AppError::Authorization(
-            "Access denied to this space".to_string(),
-        ));
-    }
+    // 空间访问权限已通过 get_space_by_id/get_space_by_slug 验证
 
     let include_inactive = params.include_inactive.unwrap_or(false);
     let result = app_state

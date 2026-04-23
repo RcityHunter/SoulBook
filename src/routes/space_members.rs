@@ -170,6 +170,7 @@ async fn remove_member(
 mod tests {
     use super::*;
     use crate::models::space_member::{InviteMemberRequest, MemberRole};
+    use validator::Validate;
 
     #[test]
     fn test_invite_member_validation() {

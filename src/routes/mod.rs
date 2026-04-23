@@ -1,15 +1,25 @@
 pub mod agent;
+pub mod ai_tasks;
 pub mod auth;
+pub mod change_requests;
 pub mod comments;
+pub mod developer;
 pub mod documents;
 pub mod files;
+pub mod git_sync;
+pub mod language;
+pub mod local_auth;
 pub mod notifications;
 pub mod publication;
+pub mod publish;
 pub mod search;
+pub mod settings;
 pub mod space_members;
 pub mod spaces;
 pub mod stats;
 pub mod tags;
+pub mod templates;
+pub mod tool_configs;
 pub mod vectors;
 pub mod versions;
 

@@ -114,13 +114,10 @@ mod tests {
     fn create_test_user(id: &str, roles: Vec<&str>, permissions: Vec<&str>) -> User {
         User {
             id: id.to_string(),
-            username: format!("user_{}", id),
             email: format!("{}@example.com", id),
             roles: roles.into_iter().map(|s| s.to_string()).collect(),
             permissions: permissions.into_iter().map(|s| s.to_string()).collect(),
-            is_active: true,
-            last_login: None,
-            created_at: chrono::Utc::now(),
+            profile: None,
         }
     }
 

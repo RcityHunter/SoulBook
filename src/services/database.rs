@@ -7,7 +7,7 @@ use std::any::TypeId;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use surrealdb::types::{RecordId as Thing, RecordIdKey};
+use surrealdb::types::{RecordId as Thing, RecordIdKey, Value as SurrealValue};
 use surrealdb::IndexedResults;
 use tracing::{error, info};
 
@@ -78,13 +78,22 @@ impl Response {
     ) -> std::result::Result<T, surrealdb::Error> {
         match index.into() {
             TakeIndex::Statement(idx) => {
-                let raw: surrealdb::types::Value = self.inner.take(idx)?;
-                decode_take_value::<T>(raw.into_json_value())
+                let raw: SurrealValue = self
+                    .inner
+                    .take(idx)
+                    .map_err(|e| surrealdb::Error::thrown(e.to_string()))?;
+                let raw =
+                    serde_json::to_value(raw).map_err(|e| surrealdb::Error::thrown(e.to_string()))?;
+                decode_take_value::<T>(raw)
             }
             TakeIndex::Field(stmt_idx, field) => {
-                let raw: surrealdb::types::Value = self.inner.take(stmt_idx)?;
-                let json = raw.into_json_value();
-                let extracted = json.get(&field).cloned().unwrap_or(serde_json::Value::Null);
+                let raw: SurrealValue = self
+                    .inner
+                    .take(stmt_idx)
+                    .map_err(|e| surrealdb::Error::thrown(e.to_string()))?;
+                let raw =
+                    serde_json::to_value(raw).map_err(|e| surrealdb::Error::thrown(e.to_string()))?;
+                let extracted = raw.get(&field).cloned().unwrap_or(serde_json::Value::Null);
                 decode_take_value::<T>(extracted)
             }
         }
@@ -352,9 +361,16 @@ impl ClientWrapper {
                     .await
                     .map_err(|e| surrealdb::Error::thrown(e.to_string()))?;
 
-                let rows: Vec<serde_json::Value> = res
+                let raw: SurrealValue = res
                     .take(0)
                     .map_err(|e| surrealdb::Error::thrown(e.to_string()))?;
+                let raw =
+                    serde_json::to_value(raw).map_err(|e| surrealdb::Error::thrown(e.to_string()))?;
+                let rows: Vec<serde_json::Value> = match raw {
+                    serde_json::Value::Array(arr) => arr,
+                    serde_json::Value::Null => vec![],
+                    other => vec![other],
+                };
                 let result: Option<serde_json::Value> =
                     rows.into_iter().next().map(detag_surreal_json);
 
@@ -399,18 +415,19 @@ impl ClientWrapper {
         T: for<'de> serde::Deserialize<'de> + std::fmt::Debug,
     {
         let resource_id = resource.into();
-        let thing = match resource_id {
-            ResourceId::Record(table, id) => Thing::new(table, id),
+        let (table, id) = match resource_id {
+            ResourceId::Record(table, id) => (table, id),
             _ => {
                 return Err(surrealdb::Error::thrown(
                     "Delete requires a specific record ID".to_string(),
                 ));
             }
         };
+        let storage_id = Thing::new(table, id);
 
         let deleted: Option<serde_json::Value> = self
             .storage
-            .delete(thing)
+            .delete(storage_id)
             .await
             .map_err(|e| surrealdb::Error::thrown(e.to_string()))?;
 
@@ -673,21 +690,22 @@ where
 
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
-            let thing = match self.resource {
-                ResourceId::Record(table, id) => Thing::new(table, id),
+            let (table, id) = match self.resource {
+                ResourceId::Record(table, id) => (table, id),
                 _ => {
                     return Err(surrealdb::Error::thrown(
                         "Update requires a specific record ID".to_string(),
                     ));
                 }
             };
+            let storage_id = Thing::new(table, id);
 
             let payload = serde_json::to_value(self.content)
                 .map_err(|e| surrealdb::Error::thrown(e.to_string()))?;
 
             let updated: Option<serde_json::Value> = self
                 .storage
-                .update(thing, payload)
+                .update(storage_id, payload)
                 .await
                 .map_err(|e| surrealdb::Error::thrown(e.to_string()))?;
 

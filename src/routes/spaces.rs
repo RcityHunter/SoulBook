@@ -11,6 +11,7 @@ use axum::{
     routing::{delete, get, post, put},
     Extension, Router,
 };
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -18,6 +19,7 @@ use tracing::{info, warn};
 pub fn router() -> Router {
     Router::new()
         .route("/", get(list_spaces).post(create_space))
+        .route("/check-slug", get(check_slug))
         .route("/create", post(handle_legacy_create)) // Legacy frontend support
         .route("/create/stats", get(handle_legacy_create_stats)) // Legacy frontend support
         .route(
@@ -25,6 +27,26 @@ pub fn router() -> Router {
             get(get_space).put(update_space).delete(delete_space),
         )
         .route("/:slug/stats", get(get_space_stats))
+}
+
+#[derive(Deserialize)]
+struct CheckSlugQuery {
+    slug: String,
+}
+
+async fn check_slug(
+    Extension(app_state): Extension<Arc<AppState>>,
+    Query(params): Query<CheckSlugQuery>,
+) -> Result<Json<Value>> {
+    let available = app_state
+        .space_service
+        .is_slug_available(&params.slug)
+        .await?;
+    Ok(Json(json!({
+        "success": true,
+        "data": { "available": available, "slug": params.slug },
+        "message": "Slug availability checked"
+    })))
 }
 
 /// 获取空间列表
@@ -181,16 +203,10 @@ async fn handle_legacy_create_stats(
 mod tests {
     use super::*;
     use crate::models::space::CreateSpaceRequest;
-    use axum::http::StatusCode;
-    use axum_test::TestServer;
+    use validator::Validate;
 
     // 注意：这些测试需要实际的数据库连接
     // 在实际项目中，应该使用测试数据库或模拟
-
-    async fn create_test_server() -> TestServer {
-        let app = Router::new().nest("/api/spaces", router());
-        TestServer::new(app).unwrap()
-    }
 
     #[tokio::test]
     async fn test_create_space_validation() {

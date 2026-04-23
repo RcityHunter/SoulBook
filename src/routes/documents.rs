@@ -5,12 +5,13 @@ use crate::{
     AppState,
 };
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Multipart, Path, Query, State},
     http::StatusCode,
     response::Json,
     routing::{delete, get, post, put},
     Extension, Router,
 };
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -35,6 +36,9 @@ pub fn router() -> Router {
     Router::new()
         .route("/:space_slug", get(list_documents).post(create_document))
         .route("/:space_slug/tree", get(get_document_tree))
+        .route("/:space_slug/batch-delete", post(batch_delete_documents))
+        .route("/:space_slug/batch-publish", post(batch_publish_documents))
+        .route("/:space_slug/import", post(import_document))
         .route("/create/tree", get(handle_legacy_create_tree)) // Legacy frontend support
         .route(
             "/:space_slug/:doc_slug",
@@ -42,6 +46,12 @@ pub fn router() -> Router {
                 .put(update_document)
                 .delete(delete_document),
         )
+        .route("/:space_slug/:doc_slug/move", post(move_document_handler))
+        .route(
+            "/:space_slug/:doc_slug/duplicate",
+            post(duplicate_document_handler),
+        )
+        .route("/:space_slug/:doc_slug/export", get(export_document))
         .route(
             "/:space_slug/:doc_slug/children",
             get(get_document_children),
@@ -641,16 +651,444 @@ async fn get_document_breadcrumbs_by_id(
     })))
 }
 
+// ─── batch-delete ────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct BatchDeleteRequest {
+    document_ids: Vec<String>,
+}
+
+async fn batch_delete_documents(
+    Extension(app_state): Extension<Arc<AppState>>,
+    Path(space_slug): Path<String>,
+    user: User,
+    Json(request): Json<BatchDeleteRequest>,
+) -> Result<Json<Value>> {
+    let space = app_state
+        .space_service
+        .get_space_by_slug(&space_slug, Some(&user))
+        .await?;
+
+    if !is_space_owner(&space.owner_id, &user.id) {
+        if !app_state
+            .space_member_service
+            .can_access_space(&space.id, Some(&user.id))
+            .await?
+        {
+            return Err(AppError::Authorization(
+                "Access denied to this space".to_string(),
+            ));
+        }
+        if !app_state
+            .space_member_service
+            .check_permission(&space.id, &user.id, "docs.delete")
+            .await?
+        {
+            return Err(AppError::Authorization(
+                "Permission denied: docs.delete required".to_string(),
+            ));
+        }
+    }
+
+    let mut deleted_count = 0usize;
+    let mut failed_ids: Vec<String> = Vec::new();
+
+    for doc_id in &request.document_ids {
+        match app_state
+            .document_service
+            .delete_document(doc_id, &user.id)
+            .await
+        {
+            Ok(_) => deleted_count += 1,
+            Err(_) => failed_ids.push(doc_id.clone()),
+        }
+    }
+
+    info!(
+        "User {} batch-deleted {} documents in space {}",
+        user.id, deleted_count, space_slug
+    );
+
+    Ok(Json(json!({
+        "success": true,
+        "data": { "deleted_count": deleted_count, "failed_ids": failed_ids },
+        "message": format!("Deleted {} documents", deleted_count)
+    })))
+}
+
+// ─── batch-publish ───────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct BatchPublishRequest {
+    document_ids: Vec<String>,
+    is_public: bool,
+}
+
+async fn batch_publish_documents(
+    Extension(app_state): Extension<Arc<AppState>>,
+    Path(space_slug): Path<String>,
+    user: User,
+    Json(request): Json<BatchPublishRequest>,
+) -> Result<Json<Value>> {
+    let space = app_state
+        .space_service
+        .get_space_by_slug(&space_slug, Some(&user))
+        .await?;
+
+    if !is_space_owner(&space.owner_id, &user.id) {
+        if !app_state
+            .space_member_service
+            .can_access_space(&space.id, Some(&user.id))
+            .await?
+        {
+            return Err(AppError::Authorization(
+                "Access denied to this space".to_string(),
+            ));
+        }
+        if !app_state
+            .space_member_service
+            .check_permission(&space.id, &user.id, "docs.write")
+            .await?
+        {
+            return Err(AppError::Authorization(
+                "Permission denied: docs.write required".to_string(),
+            ));
+        }
+    }
+
+    let mut updated_count = 0usize;
+    let mut failed_ids: Vec<String> = Vec::new();
+
+    for doc_id in &request.document_ids {
+        let patch = UpdateDocumentRequest {
+            title: None,
+            content: None,
+            excerpt: None,
+            is_public: Some(request.is_public),
+            status: None,
+            parent_id: None,
+            order_index: None,
+            metadata: None,
+        };
+        match app_state
+            .document_service
+            .update_document(doc_id, &user.id, patch)
+            .await
+        {
+            Ok(_) => updated_count += 1,
+            Err(_) => failed_ids.push(doc_id.clone()),
+        }
+    }
+
+    Ok(Json(json!({
+        "success": true,
+        "data": { "updated_count": updated_count, "failed_ids": failed_ids },
+        "message": format!("Updated {} documents", updated_count)
+    })))
+}
+
+// ─── import ──────────────────────────────────────────────────────────────────
+
+async fn import_document(
+    Extension(app_state): Extension<Arc<AppState>>,
+    Path(space_slug): Path<String>,
+    user: User,
+    mut multipart: Multipart,
+) -> Result<Json<Value>> {
+    let space = app_state
+        .space_service
+        .get_space_by_slug(&space_slug, Some(&user))
+        .await?;
+
+    if !is_space_owner(&space.owner_id, &user.id) {
+        if !app_state
+            .space_member_service
+            .can_access_space(&space.id, Some(&user.id))
+            .await?
+        {
+            return Err(AppError::Authorization(
+                "Access denied to this space".to_string(),
+            ));
+        }
+        if !app_state
+            .space_member_service
+            .check_permission(&space.id, &user.id, "docs.write")
+            .await?
+        {
+            return Err(AppError::Authorization(
+                "Permission denied: docs.write required".to_string(),
+            ));
+        }
+    }
+
+    let mut title = String::new();
+    let mut content = String::new();
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| AppError::BadRequest(e.to_string()))?
+    {
+        let name = field.name().unwrap_or("").to_string();
+        match name.as_str() {
+            "file" => {
+                let filename = field
+                    .file_name()
+                    .unwrap_or("import.md")
+                    .trim_end_matches(".md")
+                    .to_string();
+                if title.is_empty() {
+                    title = filename;
+                }
+                let bytes = field
+                    .bytes()
+                    .await
+                    .map_err(|e| AppError::BadRequest(e.to_string()))?;
+                content = String::from_utf8(bytes.to_vec())
+                    .map_err(|_| AppError::BadRequest("File must be valid UTF-8".to_string()))?;
+            }
+            "title" => {
+                title = field
+                    .text()
+                    .await
+                    .map_err(|e| AppError::BadRequest(e.to_string()))?;
+            }
+            _ => {}
+        }
+    }
+
+    if content.is_empty() {
+        return Err(AppError::BadRequest("No file content provided".to_string()));
+    }
+
+    let title = if title.is_empty() {
+        "Imported Document".to_string()
+    } else {
+        title
+    };
+    let slug = slug::slugify(&title);
+
+    let doc_request = CreateDocumentRequest {
+        title,
+        slug,
+        content: Some(content),
+        excerpt: None,
+        is_public: Some(false),
+        status: None,
+        parent_id: None,
+        order_index: None,
+        metadata: None,
+    };
+
+    let document = app_state
+        .document_service
+        .create_document(&space.id, &user.id, doc_request)
+        .await?;
+
+    info!(
+        "User {} imported document '{}' into space {}",
+        user.id, document.slug, space_slug
+    );
+
+    Ok(Json(json!({
+        "success": true,
+        "data": document,
+        "message": "Document imported successfully"
+    })))
+}
+
+// ─── move ────────────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct MoveDocumentRequest {
+    new_parent_id: Option<String>,
+    new_order_index: Option<i32>,
+}
+
+async fn move_document_handler(
+    Extension(app_state): Extension<Arc<AppState>>,
+    Path((space_slug, doc_slug)): Path<(String, String)>,
+    user: User,
+    Json(request): Json<MoveDocumentRequest>,
+) -> Result<Json<Value>> {
+    let space = app_state
+        .space_service
+        .get_space_by_slug(&space_slug, Some(&user))
+        .await?;
+
+    if !is_space_owner(&space.owner_id, &user.id) {
+        if !app_state
+            .space_member_service
+            .check_permission(&space.id, &user.id, "docs.write")
+            .await?
+        {
+            return Err(AppError::Authorization(
+                "Permission denied: docs.write required".to_string(),
+            ));
+        }
+    }
+
+    let document = app_state
+        .document_service
+        .get_document_by_slug(&space.id, &doc_slug)
+        .await?;
+
+    let doc_id = document
+        .id
+        .as_ref()
+        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Document ID missing")))?;
+
+    let updated = app_state
+        .document_service
+        .move_document(
+            doc_id,
+            request.new_parent_id,
+            request.new_order_index,
+            &user.id,
+        )
+        .await?;
+
+    Ok(Json(json!({
+        "success": true,
+        "data": updated,
+        "message": "Document moved successfully"
+    })))
+}
+
+// ─── duplicate ───────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct DuplicateDocumentRequest {
+    new_title: Option<String>,
+    new_slug: Option<String>,
+}
+
+async fn duplicate_document_handler(
+    Extension(app_state): Extension<Arc<AppState>>,
+    Path((space_slug, doc_slug)): Path<(String, String)>,
+    user: User,
+    Json(request): Json<DuplicateDocumentRequest>,
+) -> Result<Json<Value>> {
+    let space = app_state
+        .space_service
+        .get_space_by_slug(&space_slug, Some(&user))
+        .await?;
+
+    if !is_space_owner(&space.owner_id, &user.id) {
+        if !app_state
+            .space_member_service
+            .check_permission(&space.id, &user.id, "docs.write")
+            .await?
+        {
+            return Err(AppError::Authorization(
+                "Permission denied: docs.write required".to_string(),
+            ));
+        }
+    }
+
+    let document = app_state
+        .document_service
+        .get_document_by_slug(&space.id, &doc_slug)
+        .await?;
+
+    let doc_id = document
+        .id
+        .as_ref()
+        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Document ID missing")))?;
+
+    let duplicated = app_state
+        .document_service
+        .duplicate_document(doc_id, request.new_title, request.new_slug, &user.id)
+        .await?;
+
+    Ok(Json(json!({
+        "success": true,
+        "data": duplicated,
+        "message": "Document duplicated successfully"
+    })))
+}
+
+// ─── export ──────────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct ExportQuery {
+    format: Option<String>,
+}
+
+async fn export_document(
+    Extension(app_state): Extension<Arc<AppState>>,
+    Path((space_slug, doc_slug)): Path<(String, String)>,
+    Query(params): Query<ExportQuery>,
+    OptionalUser(user): OptionalUser,
+) -> Result<Json<Value>> {
+    let space = app_state
+        .space_service
+        .get_space_by_slug(&space_slug, user.as_ref())
+        .await?;
+
+    if !space.is_public {
+        match &user {
+            None => {
+                return Err(AppError::Authorization(
+                    "Authentication required".to_string(),
+                ))
+            }
+            Some(u) => {
+                if !is_space_owner(&space.owner_id, &u.id)
+                    && !app_state
+                        .space_member_service
+                        .can_access_space(&space.id, Some(&u.id))
+                        .await?
+                {
+                    return Err(AppError::Authorization(
+                        "Access denied to this space".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
+    let document = app_state
+        .document_service
+        .get_document_by_slug(&space.id, &doc_slug)
+        .await?;
+
+    let format = params.format.as_deref().unwrap_or("markdown");
+
+    let (content, extension) = match format {
+        "html" => {
+            use pulldown_cmark::{html, Options, Parser};
+            let parser = Parser::new_ext(&document.content, Options::all());
+            let mut html_output = String::new();
+            html::push_html(&mut html_output, parser);
+            (html_output, "html")
+        }
+        "markdown" | "md" => (document.content.clone(), "md"),
+        other => {
+            return Err(AppError::BadRequest(format!(
+                "Unsupported export format: {}. Use 'markdown' or 'html'.",
+                other
+            )))
+        }
+    };
+
+    Ok(Json(json!({
+        "success": true,
+        "data": {
+            "content": content,
+            "format": format,
+            "filename": format!("{}.{}", document.slug, extension),
+            "title": document.title
+        },
+        "message": "Document exported successfully"
+    })))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::models::document::CreateDocumentRequest;
-    use axum_test::TestServer;
-
-    async fn create_test_server() -> TestServer {
-        let app = Router::new().nest("/api/docs", router());
-        TestServer::new(app).unwrap()
-    }
+    use validator::Validate;
 
     #[tokio::test]
     async fn test_create_document_validation() {
@@ -660,6 +1098,7 @@ mod tests {
             content: None,
             excerpt: None,
             is_public: None,
+            status: None,
             parent_id: None,
             order_index: None,
             metadata: None,
@@ -676,6 +1115,7 @@ mod tests {
             content: Some("# Test Content".to_string()),
             excerpt: None,
             is_public: Some(true),
+            status: None,
             parent_id: None,
             order_index: Some(1),
             metadata: None,
@@ -689,6 +1129,7 @@ mod tests {
             content: None,
             excerpt: None,
             is_public: None,
+            status: None,
             parent_id: None,
             order_index: None,
             metadata: None,
@@ -707,6 +1148,7 @@ mod tests {
             content: None,
             excerpt: None,
             is_public: None,
+            status: None,
             parent_id: None,
             order_index: None,
             metadata: None,

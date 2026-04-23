@@ -349,8 +349,10 @@ impl FileUploadService {
 
         sql.push_str(" ORDER BY created_at DESC");
 
-        // 获取总数
-        let count_sql = sql.replace("SELECT *", "SELECT count()");
+        // 获取总数 (count query must not have ORDER BY)
+        let count_sql = sql
+            .replace("SELECT *", "SELECT count()")
+            .replace(" ORDER BY created_at DESC", "");
         let mut query = self.db.client.query(count_sql);
         for (key, value) in &params {
             query = query.bind((*key, value));

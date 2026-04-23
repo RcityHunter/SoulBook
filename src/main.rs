@@ -172,6 +172,7 @@ async fn main() -> anyhow::Result<()> {
 
     // 创建路由
     let mut app = Router::new()
+        .nest("/api/auth", routes::local_auth::router()) // 本地登录注册
         .nest("/api/docs/agent", agent::router::router())
         .nest("/api/docs/auth", routes::auth::router())
         .nest("/api/docs/spaces", routes::spaces::router())
@@ -185,6 +186,18 @@ async fn main() -> anyhow::Result<()> {
         .nest("/api/docs/search", routes::search::router())
         .nest("/api/docs/stats", routes::stats::router())
         .nest("/api/docs/versions", routes::versions::router())
+        .nest(
+            "/api/docs/change-requests",
+            routes::change_requests::router(),
+        )
+        .nest("/api/docs/ai-tasks", routes::ai_tasks::router())
+        .nest("/api/docs/language", routes::language::router())
+        .nest("/api/docs/settings", routes::settings::router())
+        .nest("/api/docs/tool-configs", routes::tool_configs::router())
+        .nest("/api/docs/git-sync", routes::git_sync::router())
+        .nest("/api/docs/developer", routes::developer::router())
+        .nest("/api/docs/templates", routes::templates::router())
+        .nest("/api/docs/publish", routes::publish::router())
         .nest("/api/docs", vectors_router())
         .nest("/agent/v1", agent::router::router())
         .route("/sso", get(sso_bridge));
@@ -252,6 +265,7 @@ async fn sso_bridge(
         localStorage.setItem('jwt_token', token);
         localStorage.setItem('auth_token', token);
         localStorage.setItem('token', token);
+        localStorage.setItem('souldoc_token', token);
       }} catch (e) {{
         // ignore storage errors
       }}

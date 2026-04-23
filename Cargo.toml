@@ -16,7 +16,8 @@ tokio = { version = "1.28", features = ["full"] }
 # 数据库 (与Rainbow-Auth相同版本)
 reqwest = { version = "0.11", features = ["json"] }
 base64 = "0.21"
-surrealdb = { version = "3.0.0", features = ["protocol-http"] }
+# surrealdb types only - connection is via soulcore/reqwest
+surrealdb = { version = "3.0.0", default-features = false }
 # 使用soulcore替代直接的数据库操作
 soulcore = { path = "../soulcore", default-features = false, features = ["storage", "surrealdb-http"] }
 

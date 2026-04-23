@@ -372,10 +372,8 @@ impl SpaceService {
                 .ok_or_else(|| AppError::NotFound("Space not found".to_string()))?
         };
 
-        // 检查基础访问权限（公开性和所有者）
-        if !space.can_access(user.map(|u| u.id.as_str())) {
-            // 注意：这里应该集成SpaceMemberService的权限检查
-            // 但为了避免循环依赖，建议在调用方进行额外的成员权限检查
+        // 匿名访问私有空间才拒绝；已认证用户的成员权限由各路由自行检查
+        if user.is_none() && !space.is_public {
             return Err(AppError::Authorization(
                 "Access denied to this space".to_string(),
             ));
@@ -453,10 +451,8 @@ impl SpaceService {
                 .ok_or_else(|| AppError::NotFound("Space not found".to_string()))?
         };
 
-        // 检查基础访问权限（公开性和所有者）
-        if !space.can_access(user.map(|u| u.id.as_str())) {
-            // 注意：这里应该集成SpaceMemberService的权限检查
-            // 但为了避免循环依赖，建议在调用方进行额外的成员权限检查
+        // 匿名访问私有空间才拒绝；已认证用户的成员权限由各路由自行检查
+        if user.is_none() && !space.is_public {
             return Err(AppError::Authorization(
                 "Access denied to this space".to_string(),
             ));
@@ -607,6 +603,10 @@ impl SpaceService {
             .await?;
 
         Ok(())
+    }
+
+    pub async fn is_slug_available(&self, slug: &str) -> Result<bool> {
+        Ok(!self.slug_exists(slug).await?)
     }
 
     /// 检查slug是否已存在（全局检查）

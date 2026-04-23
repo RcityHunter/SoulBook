@@ -321,7 +321,11 @@ async fn get_document(
     let user = optional_user.0;
     let request_id = request_id.map(|Extension(request_id)| request_id);
 
-    let document = match app_state.document_service.get_document_by_id(&document_id).await {
+    let document = match app_state
+        .document_service
+        .get_document_by_id(&document_id)
+        .await
+    {
         Ok(document) => document,
         Err(error) => {
             return agent_error_response::<Document>(
@@ -422,7 +426,11 @@ async fn search_documents(
         }),
     };
 
-    match app_state.search_service.search(&user.id, search_request).await {
+    match app_state
+        .search_service
+        .search(&user.id, search_request)
+        .await
+    {
         Ok(result) => ok_response(
             StatusCode::OK,
             request_id.clone(),
