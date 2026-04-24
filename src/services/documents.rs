@@ -256,7 +256,7 @@ impl DocumentService {
         let query = if request.parent_id.is_some() {
             r#"
                 CREATE document SET
-                    space_id = type::record($space_id),
+                    space_id = $space_id,
                     title = $title,
                     slug = $slug,
                     author_id = $author_id,
@@ -268,13 +268,13 @@ impl DocumentService {
                     is_deleted = false,
                     status = $status,
                     view_count = 0,
-                    parent_id = type::record($parent_id),
+                    parent_id = $parent_id,
                     order_index = $order_index
             "#
         } else {
             r#"
                 CREATE document SET
-                    space_id = type::record($space_id),
+                    space_id = $space_id,
                     title = $title,
                     slug = $slug,
                     author_id = $author_id,
@@ -293,7 +293,7 @@ impl DocumentService {
 
         let mut query_builder = self.db.client.query(query);
         query_builder = query_builder
-            .bind(("space_id", format!("space:{}", actual_space_id)))
+            .bind(("space_id", Self::space_thing(actual_space_id)))
             .bind(("title", request.title.clone()))
             .bind(("slug", request.slug.clone()))
             .bind(("author_id", author_id.to_string()))
@@ -306,12 +306,7 @@ impl DocumentService {
             .bind(("order_index", request.order_index.unwrap_or(0)));
 
         if let Some(parent_id) = &request.parent_id {
-            let actual_parent_id = parent_id
-                .strip_prefix("document:")
-                .unwrap_or(parent_id)
-                .trim_matches(|c| c == '⟨' || c == '⟩');
-            query_builder =
-                query_builder.bind(("parent_id", format!("document:{}", actual_parent_id)));
+            query_builder = query_builder.bind(("parent_id", Self::document_thing(parent_id)));
         }
 
         let mut result = query_builder
