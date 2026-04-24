@@ -50,6 +50,25 @@ impl DocumentService {
         Thing::new("document", Self::normalize_document_id(document_id))
     }
 
+    fn extract_record_key(value: &serde_json::Value) -> Option<String> {
+        match value {
+            serde_json::Value::String(s) => Some(Self::normalize_document_id(s)),
+            serde_json::Value::Object(map) => {
+                if let Some(id) = map.get("id") {
+                    return Self::extract_record_key(id);
+                }
+                if let Some(key) = map.get("key") {
+                    return Self::extract_record_key(key);
+                }
+                if let Some(s) = map.get("String").and_then(|v| v.as_str()) {
+                    return Some(s.to_string());
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     fn document_select_fields() -> &'static str {
         "string::replace(type::string(id), 'document:', '') AS id, \
          string::replace(type::string(space_id), 'space:', '') AS space_id, \
@@ -317,15 +336,20 @@ impl DocumentService {
             .await
             .map_err(Self::map_document_write_error)?;
 
-        let created_documents: Vec<DocumentDb> = result
+        let created_documents: Vec<serde_json::Value> = result
             .take(0)
             .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
 
-        let created_document = created_documents
+        let created_id = created_documents
             .into_iter()
             .next()
-            .map(Document::from)
-            .ok_or_else(|| ApiError::InternalServerError("Failed to create document".to_string()))?;
+            .and_then(|raw| raw.get("id").cloned())
+            .and_then(|id| Self::extract_record_key(&id))
+            .ok_or_else(|| {
+                ApiError::InternalServerError("Failed to decode created document id".to_string())
+            })?;
+
+        let created_document = self.get_document_by_id(&created_id).await?;
 
         // 更新搜索索引
         if let Some(search_service) = &self.search_service {
