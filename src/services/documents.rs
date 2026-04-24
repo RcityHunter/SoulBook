@@ -1,6 +1,5 @@
 use chrono::Utc;
 use std::sync::Arc;
-use surrealdb::types::RecordId as Thing;
 use validator::Validate;
 
 use crate::{
@@ -42,12 +41,12 @@ impl DocumentService {
             .to_string()
     }
 
-    fn space_thing(space_id: &str) -> Thing {
-        Thing::new("space", Self::normalize_space_id(space_id))
+    fn space_record_id(space_id: &str) -> String {
+        format!("space:{}", Self::normalize_space_id(space_id))
     }
 
-    fn document_thing(document_id: &str) -> Thing {
-        Thing::new("document", Self::normalize_document_id(document_id))
+    fn document_record_id(document_id: &str) -> String {
+        format!("document:{}", Self::normalize_document_id(document_id))
     }
 
     fn extract_record_key(value: &serde_json::Value) -> Option<String> {
@@ -149,12 +148,10 @@ impl DocumentService {
         let limit = query.limit.unwrap_or(20);
         let offset = (page - 1) * limit;
 
-        let space_record = Self::space_thing(actual_space_id);
-
         // 查询文档列表
         let base_query = format!(
             "SELECT {} FROM document
-             WHERE space_id = $space_id
+             WHERE space_id = type::record($space_id)
              AND is_deleted = false
              ORDER BY order_index ASC, created_at DESC
              LIMIT $limit START $offset",
@@ -163,7 +160,7 @@ impl DocumentService {
         let mut documents_query = self.db.client.query(base_query);
 
         documents_query = documents_query
-            .bind(("space_id", space_record.clone()))
+            .bind(("space_id", Self::space_record_id(actual_space_id)))
             .bind(("limit", limit))
             .bind(("offset", offset));
 
@@ -171,7 +168,7 @@ impl DocumentService {
         if let Some(search) = &query.search {
             let search_query = format!(
                 "SELECT {} FROM document
-                 WHERE space_id = $space_id
+                 WHERE space_id = type::record($space_id)
                  AND is_deleted = false
                  AND (title CONTAINS $search OR content CONTAINS $search)
                  ORDER BY order_index ASC, created_at DESC
@@ -182,7 +179,7 @@ impl DocumentService {
                 .db
                 .client
                 .query(search_query)
-                .bind(("space_id", space_record.clone()))
+                .bind(("space_id", Self::space_record_id(actual_space_id)))
                 .bind(("search", search))
                 .bind(("limit", limit))
                 .bind(("offset", offset));
@@ -203,7 +200,7 @@ impl DocumentService {
         // 暂时使用简单的总数计算 - 由于分页问题，暂时查询所有文档获取总数
         let all_query = format!(
             "SELECT {} FROM document
-             WHERE space_id = $space_id
+             WHERE space_id = type::record($space_id)
              AND is_deleted = false",
             Self::document_select_fields()
         );
@@ -211,7 +208,7 @@ impl DocumentService {
             .db
             .client
             .query(all_query)
-            .bind(("space_id", space_record.clone()));
+            .bind(("space_id", Self::space_record_id(actual_space_id)));
 
         let mut all_docs_result = all_docs_query
             .await
@@ -343,13 +340,23 @@ impl DocumentService {
         let created_id = created_documents
             .into_iter()
             .next()
-            .and_then(|raw| raw.get("id").cloned())
-            .and_then(|id| Self::extract_record_key(&id))
-            .ok_or_else(|| {
-                ApiError::InternalServerError("Failed to decode created document id".to_string())
-            })?;
+            .and_then(|raw| {
+                raw.get("id")
+                    .and_then(Self::extract_record_key)
+                    .or_else(|| Self::extract_record_key(&raw))
+            });
 
-        let created_document = self.get_document_by_id(&created_id).await?;
+        let created_document = match created_id {
+            Some(created_id) => self.get_document_by_id(&created_id).await?,
+            None => self
+                .get_document_by_slug(actual_space_id, &request.slug)
+                .await
+                .map_err(|_| {
+                    ApiError::InternalServerError(
+                        "Failed to decode created document id".to_string(),
+                    )
+                })?,
+        };
 
         // 更新搜索索引
         if let Some(search_service) = &self.search_service {
@@ -582,7 +589,7 @@ impl DocumentService {
 
         let query = format!(
             "SELECT {} FROM document
-             WHERE space_id = $space_id
+             WHERE space_id = type::record($space_id)
              AND is_deleted = false
              ORDER BY created_at DESC
              LIMIT $limit START $offset",
@@ -593,7 +600,7 @@ impl DocumentService {
             .db
             .client
             .query(query)
-            .bind(("space_id", Self::space_thing(space_id)))
+            .bind(("space_id", Self::space_record_id(space_id)))
             .bind(("limit", per_page))
             .bind(("offset", offset))
             .await
@@ -607,7 +614,7 @@ impl DocumentService {
     pub async fn get_document_children(&self, parent_id: &str) -> Result<Vec<Document>, ApiError> {
         let query = format!(
             "SELECT {} FROM document
-             WHERE parent_id = $parent_id
+             WHERE parent_id = type::record($parent_id)
              AND is_deleted = false
              ORDER BY order_index ASC, created_at ASC",
             Self::document_select_fields()
@@ -617,7 +624,7 @@ impl DocumentService {
             .db
             .client
             .query(query)
-            .bind(("parent_id", Self::document_thing(parent_id)))
+            .bind(("parent_id", Self::document_record_id(parent_id)))
             .await
             .map_err(|e| ApiError::DatabaseError(e.to_string()))?
             .take(0)
@@ -650,14 +657,14 @@ impl DocumentService {
         // 获取空间内所有文档
         let query = format!(
             "SELECT {} FROM document
-             WHERE space_id = $space_id
+             WHERE space_id = type::record($space_id)
              AND is_deleted = false
              ORDER BY order_index ASC, created_at ASC",
             Self::document_select_fields()
         );
 
-        let space_record = Self::space_thing(actual_space_id);
-        tracing::debug!("Querying with space_record: {:?}", space_record);
+        let space_record = Self::space_record_id(actual_space_id);
+        tracing::debug!("Querying with space_record: {}", space_record);
 
         let all_documents: Vec<Document> = self
             .db
@@ -891,7 +898,7 @@ impl DocumentService {
     ) -> Result<Document, ApiError> {
         let query = format!(
             "SELECT {} FROM document
-             WHERE space_id = $space_id
+             WHERE space_id = type::record($space_id)
              AND slug = $slug
              AND is_deleted = false",
             Self::document_select_fields()
@@ -901,7 +908,7 @@ impl DocumentService {
             .db
             .client
             .query(query)
-            .bind(("space_id", Self::space_thing(space_id)))
+            .bind(("space_id", Self::space_record_id(space_id)))
             .bind(("slug", slug))
             .await
             .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
@@ -955,7 +962,7 @@ impl DocumentService {
     async fn document_slug_exists(&self, space_id: &str, slug: &str) -> Result<bool, ApiError> {
         let query = "
             SELECT count() FROM document
-            WHERE space_id = $space_id
+            WHERE space_id = type::record($space_id)
             AND slug = $slug
             AND is_deleted = false
             GROUP ALL
@@ -965,7 +972,7 @@ impl DocumentService {
             .db
             .client
             .query(query)
-            .bind(("space_id", Self::space_thing(space_id)))
+            .bind(("space_id", Self::space_record_id(space_id)))
             .bind(("slug", slug))
             .await
             .map_err(|e| ApiError::DatabaseError(e.to_string()))?
@@ -988,8 +995,8 @@ impl DocumentService {
     ) -> Result<(), ApiError> {
         let query = "
             SELECT id FROM document
-            WHERE id = $parent_id
-            AND space_id = $space_id
+            WHERE id = type::record($parent_id)
+            AND space_id = type::record($space_id)
             AND is_deleted = false
         ";
 
@@ -997,8 +1004,8 @@ impl DocumentService {
             .db
             .client
             .query(query)
-            .bind(("parent_id", Self::document_thing(parent_id)))
-            .bind(("space_id", Self::space_thing(space_id)))
+            .bind(("parent_id", Self::document_record_id(parent_id)))
+            .bind(("space_id", Self::space_record_id(space_id)))
             .await
             .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
 
