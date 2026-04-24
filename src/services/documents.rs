@@ -6,7 +6,8 @@ use validator::Validate;
 use crate::{
     error::ApiError,
     models::document::{
-        CreateDocumentRequest, Document, DocumentMetadata, DocumentTreeNode, UpdateDocumentRequest,
+        CreateDocumentRequest, Document, DocumentDb, DocumentMetadata, DocumentTreeNode,
+        UpdateDocumentRequest,
     },
     models::version::{CreateVersionRequest, VersionChangeType},
     services::{
@@ -301,18 +302,15 @@ impl DocumentService {
             .await
             .map_err(Self::map_document_write_error)?;
 
-        // Consume the raw CREATE result (RecordId fields can't deserialize directly as String)
-        let _: Vec<serde_json::Value> = result
+        let created_documents: Vec<DocumentDb> = result
             .take(0)
             .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
 
-        // Fetch the created document using the proper SELECT with string field transformations
-        let created_document = self
-            .get_document_by_slug(actual_space_id, &request.slug)
-            .await
-            .map_err(|e| {
-                ApiError::InternalServerError(format!("Failed to retrieve created document: {}", e))
-            })?;
+        let created_document = created_documents
+            .into_iter()
+            .next()
+            .map(Document::from)
+            .ok_or_else(|| ApiError::InternalServerError("Failed to create document".to_string()))?;
 
         // 更新搜索索引
         if let Some(search_service) = &self.search_service {
