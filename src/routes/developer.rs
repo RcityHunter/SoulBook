@@ -1,15 +1,15 @@
 use axum::{
+    Extension, Router,
     extract::Path,
     response::Json,
     routing::{delete, get, post, put},
-    Extension, Router,
 };
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::{error::Result, services::auth::User, AppState};
+use crate::{AppState, error::Result, services::auth::User};
 
 pub fn router() -> Router {
     Router::new()
@@ -263,7 +263,7 @@ async fn list_ai_users(
 
 async fn get_manifest(Extension(_app_state): Extension<Arc<AppState>>) -> Json<Value> {
     Json(json!({
-        "name": "SoulDoc",
+        "name": "SoulBook",
         "version": "v5.0",
         "description": "AI-native knowledge management platform",
         "base_url": "http://localhost:3001",

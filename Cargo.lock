@@ -3937,49 +3937,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rainbow-docs"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "argon2",
- "async-trait",
- "axum 0.6.20",
- "base64 0.21.7",
- "chrono",
- "comrak",
- "config",
- "dotenv",
- "image",
- "jsonwebtoken 8.3.0",
- "lazy_static",
- "lettre",
- "mime_guess",
- "pulldown-cmark",
- "regex",
- "reqwest 0.11.27",
- "serde",
- "serde_json",
- "serde_urlencoded",
- "sha2",
- "slug",
- "soulcore",
- "surrealdb",
- "syntect",
- "thiserror 1.0.69",
- "tokio",
- "tokio-test",
- "tokio-util",
- "tower 0.4.13",
- "tower-http 0.4.4",
- "tracing",
- "tracing-subscriber",
- "urlencoding",
- "uuid",
- "validator",
- "wkhtmltopdf",
-]
-
-[[package]]
 name = "rand"
 version = "0.8.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4954,6 +4911,49 @@ checksum = "86f4aa3ad99f2088c990dfa82d367e19cb29268ed67c574d10d0a4bfe71f07e0"
 dependencies = [
  "libc",
  "windows-sys 0.60.2",
+]
+
+[[package]]
+name = "soulbook"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argon2",
+ "async-trait",
+ "axum 0.6.20",
+ "base64 0.21.7",
+ "chrono",
+ "comrak",
+ "config",
+ "dotenv",
+ "image",
+ "jsonwebtoken 8.3.0",
+ "lazy_static",
+ "lettre",
+ "mime_guess",
+ "pulldown-cmark",
+ "regex",
+ "reqwest 0.11.27",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "sha2",
+ "slug",
+ "soulcore",
+ "surrealdb",
+ "syntect",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-test",
+ "tokio-util",
+ "tower 0.4.13",
+ "tower-http 0.4.4",
+ "tracing",
+ "tracing-subscriber",
+ "urlencoding",
+ "uuid",
+ "validator",
+ "wkhtmltopdf",
 ]
 
 [[package]]

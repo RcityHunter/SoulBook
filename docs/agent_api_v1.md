@@ -1,4 +1,4 @@
-# SoulDoc Agent API v1
+# SoulBook Agent API v1
 
 > 面向 OpenClaw / agent 调用方的 **最小只读能力面**。
 >
@@ -6,7 +6,7 @@
 
 ## 1. 当前结论
 
-截至当前工作树，Agent 主线已经从“直接对接 SoulDoc 既有 `/api/docs/*` 业务 REST”收口为一组单独的 Agent 路由：
+截至当前工作树，Agent 主线已经从“直接对接 SoulBook 既有 `/api/docs/*` 业务 REST”收口为一组单独的 Agent 路由：
 
 - 主线入口：`/agent/v1`
 - 兼容入口：`/api/docs/agent`
@@ -42,7 +42,7 @@ v1 只解决三件事：
 ### 主线 Base URL
 
 ```text
-{SOULDOC_BASE_URL}/agent/v1
+{SOULBOOK_BASE_URL}/agent/v1
 ```
 
 示例：
@@ -54,7 +54,7 @@ http://localhost:3000/agent/v1
 ### 兼容入口
 
 ```text
-{SOULDOC_BASE_URL}/api/docs/agent
+{SOULBOOK_BASE_URL}/api/docs/agent
 ```
 
 说明：
@@ -419,7 +419,7 @@ GET /agent/v1/search/documents?q=...
 - `GET /api/docs/documents/{space_slug}/{doc_slug}`
 - `GET /api/docs/search`
 
-这些依然是 SoulDoc 的业务 REST 能力，但 **不再是 Agent API v1 的主契约**。
+这些依然是 SoulBook 的业务 REST 能力，但 **不再是 Agent API v1 的主契约**。
 
 它们可以继续作为：
 
@@ -461,7 +461,7 @@ GET /agent/v1/search/documents?q=...
 
 ### Prompt 注入边界
 
-SoulDoc 文档内容中可能出现：
+SoulBook 文档内容中可能出现：
 
 - 恶意 prompt
 - 误导性 shell 命令

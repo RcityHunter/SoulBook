@@ -246,7 +246,7 @@ mod tests {
     use super::{wrap_rainbow_auth_login, wrap_rainbow_auth_me};
 
     #[test]
-    fn wraps_rainbow_auth_login_into_souldoc_shape() {
+    fn wraps_rainbow_auth_login_into_soulbook_shape() {
         let upstream = json!({
             "token": "jwt-123",
             "user": {
@@ -277,7 +277,7 @@ mod tests {
     }
 
     #[test]
-    fn wraps_rainbow_auth_me_into_souldoc_shape() {
+    fn wraps_rainbow_auth_me_into_soulbook_shape() {
         let upstream = json!({
             "id": "user-1",
             "email": "user@example.com",

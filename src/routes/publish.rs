@@ -1,14 +1,14 @@
 use axum::{
+    Extension, Router,
     extract::{Path, Query},
     response::Json,
     routing::{get, post, put},
-    Extension, Router,
 };
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 
-use crate::{error::Result, services::auth::User, AppState};
+use crate::{AppState, error::Result, services::auth::User};
 
 pub fn router() -> Router {
     Router::new()
@@ -364,7 +364,7 @@ fn default_targets() -> Vec<Value> {
             "id": "publish_target:prod",
             "name": "生产环境",
             "channel": "站点发布",
-            "domain": "docs.souldoc.io",
+            "domain": "docs.soulbook.io",
             "last_release": "v2.4.0",
             "last_published_at": "2024-01-19T10:00:00Z",
             "status": "published"
@@ -373,7 +373,7 @@ fn default_targets() -> Vec<Value> {
             "id": "publish_target:preview",
             "name": "预览环境",
             "channel": "PR 预览",
-            "domain": "preview.souldoc.io",
+            "domain": "preview.soulbook.io",
             "last_release": "v2.5.0-preview",
             "last_published_at": "2024-01-21T09:00:00Z",
             "status": "preview"

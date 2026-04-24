@@ -42,7 +42,7 @@ async fn main() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    info!("Starting Rainbow-Docs service...");
+    info!("Starting SoulBook service...");
 
     // 加载配置
     dotenv::dotenv().ok();
@@ -230,7 +230,7 @@ async fn main() -> anyhow::Result<()> {
 
     // 启动服务器
     let addr = format!("{}:{}", config.server.host, config.server.port);
-    info!("Rainbow-Docs server listening on {}", addr);
+    info!("SoulBook server listening on {}", addr);
     axum::Server::bind(&addr.parse()?)
         .serve(app.into_make_service())
         .await?;
@@ -274,6 +274,7 @@ async fn sso_bridge(
         localStorage.setItem('auth_token', token);
         localStorage.setItem('token', token);
         localStorage.setItem('souldoc_token', token);
+        localStorage.setItem('soulbook_token', token);
       }} catch (e) {{
         // ignore storage errors
       }}
@@ -392,7 +393,7 @@ async fn start_installer_only_mode(config: Config) -> anyhow::Result<()> {
 
     // 启动服务器
     let addr = "0.0.0.0:3000";
-    info!("Rainbow-Docs installer-only mode listening on {}", addr);
+    info!("SoulBook installer-only mode listening on {}", addr);
     axum::Server::bind(&addr.parse()?)
         .serve(app.into_make_service())
         .await?;

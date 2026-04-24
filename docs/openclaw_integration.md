@@ -1,8 +1,8 @@
-# SoulDoc × OpenClaw 集成说明
+# SoulBook × OpenClaw 集成说明
 
 > 这份文档回答的是当前真实问题：
 >
-> **SoulDoc 已经收出一条独立的 Agent API 主线后，OpenClaw 应该怎么接，接到哪里，哪些继续明确不接。**
+> **SoulBook 已经收出一条独立的 Agent API 主线后，OpenClaw 应该怎么接，接到哪里，哪些继续明确不接。**
 
 ## 1. 先说结论
 
@@ -22,7 +22,7 @@
 
 ## 2. 为什么要这么收口
 
-直接把 SoulDoc 整套 `/api/docs/*` 业务接口原样暴露给 agent，会有几个问题：
+直接把 SoulBook 整套 `/api/docs/*` 业务接口原样暴露给 agent，会有几个问题：
 
 1. **能力面过宽**：写操作、管理动作、文件和向量接口会混进来
 2. **契约不稳定**：业务 REST 的字段和路由是为产品前后端服务，不一定适合 agent 长期消费
@@ -151,13 +151,13 @@ GET /agent/v1/search/documents?q=...
 
 ## 5. OpenClaw 侧推荐接法
 
-推荐把 SoulDoc 当成一个 **最小只读知识源**，而不是一个“自由 REST 浏览器”。
+推荐把 SoulBook 当成一个 **最小只读知识源**，而不是一个“自由 REST 浏览器”。
 
 推荐结构：
 
 ```text
 OpenClaw
-  -> SoulDoc adapter / tool definitions
+  -> SoulBook adapter / tool definitions
     -> /agent/v1
 ```
 
@@ -173,11 +173,11 @@ OpenClaw
 
 如果只保留最小能力面，建议 OpenClaw 侧工具名仍然收敛为下面 5 个：
 
-1. `souldoc_list_spaces`
-2. `souldoc_get_space`
-3. `souldoc_list_documents`
-4. `souldoc_get_document`
-5. `souldoc_search_documents`
+1. `soulbook_list_spaces`
+2. `soulbook_get_space`
+3. `soulbook_list_documents`
+4. `soulbook_get_document`
+5. `soulbook_search_documents`
 
 但要注意：
 
@@ -189,11 +189,11 @@ OpenClaw
 
 | Tool | Method | `/agent/v1` path | 主键语义 |
 |---|---|---|---|
-| `souldoc_list_spaces` | GET | `/spaces` | 无 |
-| `souldoc_get_space` | GET | `/spaces/{space_id}` | `space_id` |
-| `souldoc_list_documents` | GET | `/spaces/{space_id}/documents` | `space_id` |
-| `souldoc_get_document` | GET | `/documents/{document_id}` | `document_id` |
-| `souldoc_search_documents` | GET | `/search/documents` | 查询词 + 可选过滤 |
+| `soulbook_list_spaces` | GET | `/spaces` | 无 |
+| `soulbook_get_space` | GET | `/spaces/{space_id}` | `space_id` |
+| `soulbook_list_documents` | GET | `/spaces/{space_id}/documents` | `space_id` |
+| `soulbook_get_document` | GET | `/documents/{document_id}` | `document_id` |
+| `soulbook_search_documents` | GET | `/search/documents` | 查询词 + 可选过滤 |
 
 说明：
 
@@ -232,7 +232,7 @@ OpenClaw
 
 ## 8. 风险边界
 
-### 8.1 不要把 SoulDoc 当成可写知识库
+### 8.1 不要把 SoulBook 当成可写知识库
 
 至少在当前阶段，OpenClaw 不应该直接承担：
 

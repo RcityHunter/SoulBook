@@ -1,14 +1,14 @@
 use axum::{
+    Extension, Router,
     extract::Path,
     response::Json,
     routing::{delete, get, post, put},
-    Extension, Router,
 };
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 
-use crate::{error::Result, services::auth::User, AppState};
+use crate::{AppState, error::Result, services::auth::User};
 
 pub fn router() -> Router {
     Router::new()
@@ -159,7 +159,7 @@ async fn trigger_sync(
         "CREATE git_sync_log SET
             repo_id = $repo_id,
             triggered_by = $uid,
-            direction = 'souldoc_to_github',
+            direction = 'soulbook_to_github',
             status = 'pending',
             created_at = $now",
     )

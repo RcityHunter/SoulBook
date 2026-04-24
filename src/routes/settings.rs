@@ -1,12 +1,12 @@
 use axum::{
+    Extension, Router,
     response::Json,
     routing::{get, put},
-    Extension, Router,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 
-use crate::{error::Result, services::auth::User, AppState};
+use crate::{AppState, error::Result, services::auth::User};
 
 pub fn router() -> Router {
     Router::new()
@@ -34,7 +34,7 @@ async fn get_settings(
     let settings = items.into_iter().next().unwrap_or_else(|| {
         json!({
             "general": {
-                "platform_name": "SoulDoc",
+                "platform_name": "SoulBook",
                 "default_language": "zh-CN",
                 "timezone": "Asia/Shanghai",
                 "default_visibility": "private"

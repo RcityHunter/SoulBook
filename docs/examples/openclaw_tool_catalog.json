@@ -1,17 +1,17 @@
 {
   "version": "1.1",
-  "name": "souldoc-openclaw-agent-v1-minimal",
-  "description": "Minimal read-only SoulDoc tool catalog aligned to the /agent/v1 mainline for OpenClaw.",
-  "baseUrl": "${SOULDOC_BASE_URL}/agent/v1",
+  "name": "soulbook-openclaw-agent-v1-minimal",
+  "description": "Minimal read-only SoulBook tool catalog aligned to the /agent/v1 mainline for OpenClaw.",
+  "baseUrl": "${SOULBOOK_BASE_URL}/agent/v1",
   "auth": {
     "type": "bearer",
     "header": "Authorization",
-    "format": "Bearer ${SOULDOC_TOKEN}"
+    "format": "Bearer ${SOULBOOK_TOKEN}"
   },
   "tools": [
     {
-      "name": "souldoc_system_health",
-      "description": "Liveness probe and capability discovery for the SoulDoc agent API.",
+      "name": "soulbook_system_health",
+      "description": "Liveness probe and capability discovery for the SoulBook agent API.",
       "method": "GET",
       "path": "/system/health",
       "inputSchema": {
@@ -23,7 +23,7 @@
       "tags": ["read", "system", "health"]
     },
     {
-      "name": "souldoc_list_spaces",
+      "name": "soulbook_list_spaces",
       "description": "List spaces visible to the current caller under existing access rules.",
       "method": "GET",
       "path": "/spaces",
@@ -47,7 +47,7 @@
       "tags": ["read", "spaces"]
     },
     {
-      "name": "souldoc_get_space",
+      "name": "soulbook_get_space",
       "description": "Get metadata for a single space by stable space id.",
       "method": "GET",
       "path": "/spaces/{space_id}",
@@ -63,7 +63,7 @@
       "tags": ["read", "spaces"]
     },
     {
-      "name": "souldoc_list_documents",
+      "name": "soulbook_list_documents",
       "description": "List documents inside one space by stable space id.",
       "method": "GET",
       "path": "/spaces/{space_id}/documents",
@@ -90,7 +90,7 @@
       "tags": ["read", "documents"]
     },
     {
-      "name": "souldoc_get_document",
+      "name": "soulbook_get_document",
       "description": "Get a document body by stable document id.",
       "method": "GET",
       "path": "/documents/{document_id}",
@@ -106,8 +106,8 @@
       "tags": ["read", "documents", "content"]
     },
     {
-      "name": "souldoc_search_documents",
-      "description": "Keyword search across accessible SoulDoc documents.",
+      "name": "soulbook_search_documents",
+      "description": "Keyword search across accessible SoulBook documents.",
       "method": "GET",
       "path": "/search/documents",
       "inputSchema": {
