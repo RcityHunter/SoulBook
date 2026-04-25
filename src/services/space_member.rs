@@ -5,7 +5,7 @@ use crate::models::space_member::{
     SpaceInvitationDb, SpaceMember, SpaceMemberDb, SpaceMemberResponse, UpdateMemberRequest,
 };
 use crate::services::auth::User;
-use crate::services::database::{record_id_key, Database};
+use crate::services::database::{Database, record_id_key};
 use chrono::Utc;
 use std::sync::Arc;
 use surrealdb::types::RecordId as Thing;
@@ -26,6 +26,33 @@ fn clean_user_id_format(user_id: &str) -> String {
     without_prefix
         .trim_matches(|c| c == '⟨' || c == '⟩' || c == '"' || c == '\'' || c == '`' || c == ' ')
         .to_string()
+}
+
+fn normalize_space_id(space_id: &str) -> String {
+    let trimmed = space_id.trim();
+
+    if let Some(inner) = trimmed.strip_prefix("space:⟨⟨space:") {
+        return inner
+            .trim_end_matches("⟩⟩")
+            .trim_matches(|c| c == '⟨' || c == '⟩' || c == '"' || c == '\'' || c == '`' || c == ' ')
+            .to_string();
+    }
+
+    trimmed
+        .strip_prefix("space:")
+        .unwrap_or(trimmed)
+        .trim_matches(|c| c == '⟨' || c == '⟩' || c == '"' || c == '\'' || c == '`' || c == ' ')
+        .to_string()
+}
+
+fn space_id_match_candidates(space_id: &str) -> Vec<String> {
+    let actual_space_id = normalize_space_id(space_id);
+    vec![
+        format!("space:{}", actual_space_id),
+        format!("space:⟨{}⟩", actual_space_id),
+        format!("space:⟨space:{}⟩", actual_space_id),
+        format!("space:⟨⟨space:{}⟩⟩", actual_space_id),
+    ]
 }
 
 pub struct SpaceMemberService {
@@ -51,12 +78,8 @@ impl SpaceMemberService {
             clean_user_id, uid
         );
 
-        // 提取实际的空间ID（去掉"space:"前缀，如果存在）
-        let actual_space_id = if space_id.starts_with("space:") {
-            space_id.strip_prefix("space:").unwrap()
-        } else {
-            space_id
-        };
+        let actual_space_id = normalize_space_id(space_id);
+        let space_id_candidates = space_id_match_candidates(space_id);
 
         // 检查是否为空间所有者（数据库内比较，避免反序列化形态差异）
         let user_id_bracketed = format!("user:⟨{}⟩", clean_user_id);
@@ -95,7 +118,7 @@ impl SpaceMemberService {
         let member_query = r#"
             SELECT count() AS count
             FROM space_member
-            WHERE space_id = $space_id
+            WHERE type::string(space_id) INSIDE $space_id_candidates
               AND type::string(user_id) IN [$user_id_bracketed, $user_id_plain, $user_id_raw]
               AND status = 'accepted'
             GROUP ALL
@@ -104,7 +127,7 @@ impl SpaceMemberService {
             .db
             .client
             .query(member_query)
-            .bind(("space_id", Thing::new("space", actual_space_id)))
+            .bind(("space_id_candidates", space_id_candidates))
             .bind(("user_id_bracketed", user_id_bracketed))
             .bind(("user_id_plain", user_id_plain))
             .bind(("user_id_raw", clean_user_id.clone()))
@@ -133,12 +156,8 @@ impl SpaceMemberService {
         user_id: &str,
         permission: &str,
     ) -> Result<bool> {
-        // 提取实际的空间ID（去掉"space:"前缀，如果存在）
-        let actual_space_id = if space_id.starts_with("space:") {
-            space_id.strip_prefix("space:").unwrap()
-        } else {
-            space_id
-        };
+        let actual_space_id = normalize_space_id(space_id);
+        let space_id_candidates = space_id_match_candidates(space_id);
 
         // 清理user_id格式，确保和数据库存储格式一致
         let clean_user_id = clean_user_id_format(user_id);
@@ -185,7 +204,7 @@ impl SpaceMemberService {
         let member_query = r#"
             SELECT role, permissions
             FROM space_member
-            WHERE space_id = $space_id
+            WHERE type::string(space_id) INSIDE $space_id_candidates
               AND type::string(user_id) IN [$user_id_bracketed, $user_id_plain, $user_id_raw]
               AND status = 'accepted'
         "#;
@@ -193,7 +212,7 @@ impl SpaceMemberService {
             .db
             .client
             .query(member_query)
-            .bind(("space_id", Thing::new("space", actual_space_id)))
+            .bind(("space_id_candidates", space_id_candidates))
             .bind(("user_id_bracketed", user_id_bracketed))
             .bind(("user_id_plain", user_id_plain))
             .bind(("user_id_raw", clean_user_id.clone()))
@@ -965,5 +984,31 @@ impl SpaceMemberService {
 
         info!("Sent invitation email to {}", to_email);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_space_id, space_id_match_candidates};
+
+    #[test]
+    fn normalizes_nested_space_record_shapes() {
+        assert_eq!(normalize_space_id("test"), "test");
+        assert_eq!(normalize_space_id("space:test"), "test");
+        assert_eq!(normalize_space_id("space:⟨test⟩"), "test");
+        assert_eq!(normalize_space_id("space:⟨⟨space:test⟩⟩"), "test");
+    }
+
+    #[test]
+    fn builds_compatible_space_id_match_candidates() {
+        assert_eq!(
+            space_id_match_candidates("space:⟨⟨space:test⟩⟩"),
+            vec![
+                "space:test".to_string(),
+                "space:⟨test⟩".to_string(),
+                "space:⟨space:test⟩".to_string(),
+                "space:⟨⟨space:test⟩⟩".to_string(),
+            ]
+        );
     }
 }
