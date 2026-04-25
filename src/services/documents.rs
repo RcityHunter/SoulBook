@@ -663,18 +663,47 @@ impl DocumentService {
             Self::document_select_fields()
         );
 
+        let fallback_query = format!(
+            "SELECT {} FROM document
+             WHERE string::replace(type::string(space_id), 'space:', '') = $space_id
+             AND is_deleted = false
+             ORDER BY order_index ASC, created_at ASC",
+            Self::document_select_fields()
+        );
+
         let space_record = Self::space_record_id(actual_space_id);
         tracing::debug!("Querying with space_record: {}", space_record);
 
-        let all_documents: Vec<Document> = self
+        let all_documents: Vec<Document> = match self
             .db
             .client
             .query(query)
-            .bind(("space_id", space_record))
+            .bind(("space_id", space_record.clone()))
             .await
-            .map_err(|e| ApiError::DatabaseError(e.to_string()))?
-            .take(0)
-            .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+        {
+            Ok(mut result) => result
+                .take(0)
+                .map_err(|e| ApiError::DatabaseError(e.to_string()))?,
+            Err(primary_err) => {
+                tracing::warn!(
+                    "Primary document tree query failed for {}: {}. Falling back to string-based space_id query.",
+                    space_record,
+                    primary_err
+                );
+
+                let mut fallback_result = self
+                    .db
+                    .client
+                    .query(fallback_query)
+                    .bind(("space_id", actual_space_id))
+                    .await
+                    .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+
+                fallback_result
+                    .take(0)
+                    .map_err(|e| ApiError::DatabaseError(e.to_string()))?
+            }
+        };
 
         tracing::debug!("Found {} documents in database", all_documents.len());
 
