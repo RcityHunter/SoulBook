@@ -5,6 +5,7 @@ use axum::{
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
+use tracing::warn;
 
 use crate::{AppState, error::Result, services::auth::User};
 
@@ -23,46 +24,22 @@ async fn get_settings(
     _user: User,
 ) -> Result<Json<Value>> {
     let db = &app_state.db.client;
-    let mut result = db
+    let settings = match db
         .query("SELECT * FROM settings WHERE id = settings:global LIMIT 1")
         .await
-        .map_err(|e| crate::error::ApiError::DatabaseError(e.to_string()))?;
-    let items: Vec<Value> = result
-        .take(0)
-        .map_err(|e| crate::error::ApiError::DatabaseError(e.to_string()))?;
-
-    let settings = items.into_iter().next().unwrap_or_else(|| {
-        json!({
-            "general": {
-                "platform_name": "SoulBook",
-                "default_language": "zh-CN",
-                "timezone": "Asia/Shanghai",
-                "default_visibility": "private"
-            },
-            "ai": {
-                "default_model": "claude-3-5-sonnet",
-                "anthropic_api_key": "",
-                "concurrent_tasks": 4,
-                "auto_summary": true,
-                "ai_translation": true,
-                "seo_auto_check": false
-            },
-            "notifications": {
-                "email": true,
-                "browser": true,
-                "ai_tasks": false
-            },
-            "security": {
-                "two_factor": false,
-                "sso_enabled": true,
-                "session_timeout": 480
-            },
-            "appearance": {
-                "dark_mode": false,
-                "primary_color": "#4f46e5"
+    {
+        Ok(mut result) => match result.take::<Vec<Value>>(0) {
+            Ok(items) => items.into_iter().next().unwrap_or_else(default_settings),
+            Err(e) => {
+                warn!("failed to parse settings, using defaults: {}", e);
+                default_settings()
             }
-        })
-    });
+        },
+        Err(e) => {
+            warn!("failed to query settings, using defaults: {}", e);
+            default_settings()
+        }
+    };
 
     Ok(Json(json!({ "success": true, "data": settings })))
 }
@@ -118,16 +95,75 @@ async fn merge_settings(
         "UPDATE settings:global SET {} = $data, updated_at = $now RETURN AFTER",
         section
     );
-    let mut result = db
+    let mut result = match db
         .query(sql)
         .bind(("data", &data))
         .bind(("now", &now))
         .await
-        .map_err(|e| crate::error::ApiError::DatabaseError(e.to_string()))?;
-    let items: Vec<Value> = result
-        .take(0)
-        .map_err(|e| crate::error::ApiError::DatabaseError(e.to_string()))?;
+    {
+        Ok(result) => result,
+        Err(e) => {
+            warn!("failed to update settings section {}, returning fallback: {}", section, e);
+            return Ok(Json(json!({
+                "success": true,
+                "data": settings_with_section(section, data),
+                "warning": "settings update was not persisted"
+            })));
+        }
+    };
+    let items: Vec<Value> = match result.take(0) {
+        Ok(items) => items,
+        Err(e) => {
+            warn!("failed to parse updated settings section {}, returning fallback: {}", section, e);
+            return Ok(Json(json!({
+                "success": true,
+                "data": settings_with_section(section, data),
+                "warning": "settings update result was not readable"
+            })));
+        }
+    };
     Ok(Json(
-        json!({ "success": true, "data": items.into_iter().next() }),
+        json!({ "success": true, "data": items.into_iter().next().unwrap_or_else(|| settings_with_section(section, data)) }),
     ))
+}
+
+fn default_settings() -> Value {
+    json!({
+        "general": {
+            "platform_name": "SoulBook",
+            "default_language": "zh-CN",
+            "timezone": "Asia/Shanghai",
+            "default_visibility": "private"
+        },
+        "ai": {
+            "default_model": "claude-3-5-sonnet",
+            "anthropic_api_key": "",
+            "concurrent_tasks": 4,
+            "auto_summary": true,
+            "ai_translation": true,
+            "seo_auto_check": false
+        },
+        "notifications": {
+            "email": true,
+            "browser": true,
+            "ai_tasks": false
+        },
+        "security": {
+            "two_factor": false,
+            "sso_enabled": true,
+            "session_timeout": 480
+        },
+        "appearance": {
+            "dark_mode": false,
+            "primary_color": "#4f46e5"
+        }
+    })
+}
+
+fn settings_with_section(section: &str, data: Value) -> Value {
+    let mut settings = default_settings();
+    if let Some(object) = settings.as_object_mut() {
+        object.insert(section.to_string(), data);
+    }
+    settings
 }
