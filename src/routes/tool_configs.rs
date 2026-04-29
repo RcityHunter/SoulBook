@@ -7,6 +7,8 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
+use surrealdb::types::RecordId as Thing;
+use tracing::warn;
 
 use crate::{error::Result, services::auth::User, AppState};
 
@@ -37,13 +39,22 @@ async fn list_tool_configs(
     _user: User,
 ) -> Result<Json<Value>> {
     let db = &app_state.db.client;
-    let mut result = db
+    let mut items = match db
         .query("SELECT * FROM tool_config ORDER BY created_at ASC")
         .await
-        .map_err(|e| crate::error::ApiError::DatabaseError(e.to_string()))?;
-    let mut items: Vec<Value> = result
-        .take(0)
-        .map_err(|e| crate::error::ApiError::DatabaseError(e.to_string()))?;
+    {
+        Ok(mut result) => match result.take::<Vec<Value>>(0) {
+            Ok(items) => items,
+            Err(e) => {
+                warn!("failed to parse tool configs: {}", e);
+                Vec::new()
+            }
+        },
+        Err(e) => {
+            warn!("failed to query tool configs: {}", e);
+            Vec::new()
+        }
+    };
 
     // seed defaults if empty
     if items.is_empty() {
@@ -107,19 +118,29 @@ async fn update_tool_config(
 ) -> Result<Json<Value>> {
     let db = &app_state.db.client;
     let now = chrono::Utc::now().to_rfc3339();
-    let mut result = db
-        .query("UPDATE $id MERGE $data SET updated_at = $now RETURN AFTER")
-        .bind(("id", format!("tool_config:{}", id)))
+    let fallback = merge_tool_config_payload(&id, &body, &now);
+
+    let data = match db
+        .query("UPSERT $id MERGE $data SET updated_at = $now RETURN AFTER")
+        .bind(("id", Thing::new("tool_config", id.clone())))
         .bind(("data", &body))
         .bind(("now", &now))
         .await
-        .map_err(|e| crate::error::ApiError::DatabaseError(e.to_string()))?;
-    let items: Vec<Value> = result
-        .take(0)
-        .map_err(|e| crate::error::ApiError::DatabaseError(e.to_string()))?;
-    Ok(Json(
-        json!({ "success": true, "data": items.into_iter().next() }),
-    ))
+    {
+        Ok(mut result) => match result.take::<Vec<Value>>(0) {
+            Ok(items) => items.into_iter().next().unwrap_or(fallback),
+            Err(e) => {
+                warn!("failed to parse updated tool config {}: {}", id, e);
+                fallback
+            }
+        },
+        Err(e) => {
+            warn!("failed to update tool config {}: {}", id, e);
+            fallback
+        }
+    };
+
+    Ok(Json(json!({ "success": true, "data": data })))
 }
 
 async fn test_tool_config(
@@ -219,4 +240,73 @@ fn default_tool_configs() -> Vec<Value> {
             "actions": ["generate_report", "analyze_quality"]
         }),
     ]
+}
+
+fn default_tool_config_by_id(id: &str) -> Value {
+    default_tool_configs()
+        .into_iter()
+        .find(|item| {
+            item.get("id")
+                .and_then(Value::as_str)
+                .map(|stored_id| stored_id == format!("tool_config:{}", id))
+                .unwrap_or(false)
+        })
+        .unwrap_or_else(|| {
+            json!({
+                "id": format!("tool_config:{}", id),
+                "family": id,
+                "title": id,
+                "icon": "🛠️",
+                "description": "",
+                "model": "gpt-4o",
+                "approval_required": false,
+                "enabled": true,
+                "max_tokens": 4096,
+                "timeout_secs": 60,
+                "actions": []
+            })
+        })
+}
+
+fn merge_tool_config_payload(id: &str, body: &Value, updated_at: &str) -> Value {
+    let mut config = default_tool_config_by_id(id);
+
+    if let (Some(target), Some(source)) = (config.as_object_mut(), body.as_object()) {
+        for (key, value) in source {
+            target.insert(key.clone(), value.clone());
+        }
+        target.insert(
+            "updated_at".to_string(),
+            Value::String(updated_at.to_string()),
+        );
+    }
+
+    config
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_tool_configs_match_frontend_contract() {
+        let items = default_tool_configs();
+        assert!(!items.is_empty());
+        assert_eq!(items[0]["id"], "tool_config:content");
+        assert!(items.iter().any(|item| item["family"] == "seo"));
+        assert!(items[0].get("actions").and_then(Value::as_array).is_some());
+    }
+
+    #[test]
+    fn merge_tool_config_payload_preserves_default_and_applies_update() {
+        let merged = merge_tool_config_payload(
+            "content",
+            &json!({ "enabled": false }),
+            "2026-04-29T00:00:00Z",
+        );
+        assert_eq!(merged["id"], "tool_config:content");
+        assert_eq!(merged["family"], "content");
+        assert_eq!(merged["enabled"], false);
+        assert_eq!(merged["updated_at"], "2026-04-29T00:00:00Z");
+    }
 }

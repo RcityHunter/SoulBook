@@ -4,7 +4,8 @@ use axum::{
     routing::{get, post},
     Extension, Router,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde_json::{json, Value};
 use std::sync::Arc;
 
 use crate::{
@@ -30,23 +31,11 @@ pub struct SuggestQuery {
     pub limit: Option<i64>,
 }
 
-#[derive(Serialize)]
-pub struct SuggestResponse {
-    pub suggestions: Vec<String>,
-    pub query: String,
-}
-
-#[derive(Serialize)]
-pub struct ReindexResponse {
-    pub message: String,
-    pub indexed_count: i64,
-}
-
 pub async fn search_documents(
     Query(query): Query<SearchQuery>,
     Extension(app_state): Extension<Arc<crate::AppState>>,
     user: User,
-) -> Result<Json<SearchResponse>, ApiError> {
+) -> Result<Json<Value>, ApiError> {
     let user_id = user.id;
     let search_service = &app_state.search_service;
     let auth_service = &app_state.auth_service;
@@ -79,14 +68,14 @@ pub async fn search_documents(
 
     let response = search_service.search(&user_id, search_request).await?;
 
-    Ok(Json(response))
+    Ok(Json(search_response_payload(response)))
 }
 
 pub async fn search_suggestions(
     Query(query): Query<SuggestQuery>,
     Extension(app_state): Extension<Arc<crate::AppState>>,
     user: User,
-) -> Result<Json<SuggestResponse>, ApiError> {
+) -> Result<Json<Value>, ApiError> {
     let user_id = user.id;
     let search_service = &app_state.search_service;
     let auth_service = &app_state.auth_service;
@@ -99,16 +88,17 @@ pub async fn search_suggestions(
         .suggest_search_terms(&user_id, &query.q, limit)
         .await?;
 
-    Ok(Json(SuggestResponse {
-        suggestions,
-        query: query.q,
-    }))
+    Ok(Json(json!({
+        "success": true,
+        "data": suggestions,
+        "query": query.q,
+    })))
 }
 
 pub async fn reindex_documents(
     Extension(app_state): Extension<Arc<crate::AppState>>,
     user: User,
-) -> Result<Json<ReindexResponse>, ApiError> {
+) -> Result<Json<Value>, ApiError> {
     let user_id = user.id;
     let search_service = &app_state.search_service;
     let auth_service = &app_state.auth_service;
@@ -119,10 +109,13 @@ pub async fn reindex_documents(
 
     let indexed_count = search_service.bulk_reindex().await?;
 
-    Ok(Json(ReindexResponse {
-        message: "Documents reindexed successfully".to_string(),
-        indexed_count,
-    }))
+    Ok(Json(json!({
+        "success": true,
+        "data": {
+            "indexed_count": indexed_count,
+        },
+        "message": "Documents reindexed successfully",
+    })))
 }
 
 pub async fn search_within_space(
@@ -130,7 +123,7 @@ pub async fn search_within_space(
     Query(mut query): Query<SearchQuery>,
     Extension(app_state): Extension<Arc<crate::AppState>>,
     user: User,
-) -> Result<Json<SearchResponse>, ApiError> {
+) -> Result<Json<Value>, ApiError> {
     let user_id = user.id;
     let search_service = &app_state.search_service;
     let auth_service = &app_state.auth_service;
@@ -165,14 +158,14 @@ pub async fn search_within_space(
 
     let response = search_service.search(&user_id, search_request).await?;
 
-    Ok(Json(response))
+    Ok(Json(search_response_payload(response)))
 }
 
 pub async fn search_by_tags(
     Query(query): Query<SearchQuery>,
     Extension(app_state): Extension<Arc<crate::AppState>>,
     user: User,
-) -> Result<Json<SearchResponse>, ApiError> {
+) -> Result<Json<Value>, ApiError> {
     let user_id = user.id;
     let search_service = &app_state.search_service;
     let auth_service = &app_state.auth_service;
@@ -203,7 +196,44 @@ pub async fn search_by_tags(
 
     let response = search_service.search(&user_id, search_request).await?;
 
-    Ok(Json(response))
+    Ok(Json(search_response_payload(response)))
+}
+
+fn search_response_payload(response: SearchResponse) -> Value {
+    let results: Vec<Value> = response
+        .results
+        .into_iter()
+        .map(|result| {
+            json!({
+                "id": result.document_id,
+                "document_id": result.document_id,
+                "space_id": result.space_id,
+                "title": result.title,
+                "snippet": result.excerpt,
+                "excerpt": result.excerpt,
+                "tags": result.tags,
+                "author_id": result.author_id,
+                "last_updated": result.last_updated,
+                "score": result.score,
+                "highlights": result.highlights,
+                "result_type": "document",
+            })
+        })
+        .collect();
+
+    json!({
+        "success": true,
+        "data": {
+            "results": results,
+            "total": response.total_count,
+            "total_count": response.total_count,
+            "page": response.page,
+            "per_page": response.per_page,
+            "total_pages": response.total_pages,
+            "query": response.query,
+            "took": response.took,
+        }
+    })
 }
 
 pub fn router() -> Router {
@@ -213,4 +243,45 @@ pub fn router() -> Router {
         .route("/reindex", post(reindex_documents))
         .route("/spaces/:space_id", get(search_within_space))
         .route("/tags", get(search_by_tags))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::search::{SearchHighlight, SearchResult};
+    use surrealdb::types::Datetime;
+
+    #[test]
+    fn search_payload_is_wrapped_for_frontend_contract() {
+        let response = SearchResponse {
+            results: vec![SearchResult {
+                document_id: "document:test".to_string(),
+                space_id: "space:docs".to_string(),
+                title: "Test document".to_string(),
+                excerpt: "Search snippet".to_string(),
+                tags: vec!["tag".to_string()],
+                author_id: "user:1".to_string(),
+                last_updated: Datetime::default(),
+                score: 0.8,
+                highlights: vec![SearchHighlight {
+                    field: "title".to_string(),
+                    text: "Test".to_string(),
+                    start: 0,
+                    end: 4,
+                }],
+            }],
+            total_count: 1,
+            page: 1,
+            per_page: 20,
+            total_pages: 1,
+            query: "test".to_string(),
+            took: 3,
+        };
+
+        let payload = search_response_payload(response);
+        assert_eq!(payload["success"], true);
+        assert_eq!(payload["data"]["total"], 1);
+        assert_eq!(payload["data"]["results"][0]["id"], "document:test");
+        assert_eq!(payload["data"]["results"][0]["snippet"], "Search snippet");
+    }
 }
