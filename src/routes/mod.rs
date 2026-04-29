@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod ai_tasks;
 pub mod auth;
+pub mod auth_gateway;
 pub mod change_requests;
 pub mod comments;
 pub mod developer;

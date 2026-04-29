@@ -1,17 +1,18 @@
 ﻿use std::sync::Arc;
 
 use axum::{
+    Extension, Json, Router,
     extract::{Path, Query},
     http::StatusCode,
     middleware::from_fn,
     response::Response,
     routing::{get, post},
-    Extension, Json, Router,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
+    AppState,
     error::AppError,
     models::{
         document::{Document, DocumentQuery},
@@ -19,11 +20,10 @@ use crate::{
         space::{SpaceListQuery, SpaceResponse},
     },
     services::auth::{OptionalUser, User},
-    AppState,
 };
 
 use super::{
-    request_id::{inject_request_id, RequestId},
+    request_id::{RequestId, inject_request_id},
     response::{err_response, ok_response},
 };
 
@@ -271,7 +271,7 @@ async fn list_documents(
                 request_id.clone(),
                 "space_get_failed",
                 error.to_string(),
-            )
+            );
         }
     };
 
@@ -336,7 +336,7 @@ async fn get_document(
                 request_id.clone(),
                 "document_get_failed",
                 error.to_string(),
-            )
+            );
         }
     };
 
@@ -348,7 +348,7 @@ async fn get_document(
                 request_id.clone(),
                 "space_get_failed",
                 error.to_string(),
-            )
+            );
         }
     };
 
@@ -390,7 +390,7 @@ async fn search_documents(
                 request_id.clone(),
                 "search_documents_unauthorized",
                 "authorization required",
-            )
+            );
         }
     };
 

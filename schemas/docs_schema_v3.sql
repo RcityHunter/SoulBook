@@ -1,4 +1,4 @@
--- Rainbow-Docs Database Schema
+-- SoulBook Database Schema
 -- This file should be executed before starting the application
 -- Compatible with SurrealDB
 
@@ -294,7 +294,7 @@ DEFINE INDEX notification_invite_token_idx ON notification COLUMNS invite_token;
 
 
 
--- Rainbow-Docs 发布功能数据库表结构
+-- SoulBook 发布功能数据库表结构
 -- 用于实现 GitBook 风格的文档集发布功能
 
 -- 空间发布记录表

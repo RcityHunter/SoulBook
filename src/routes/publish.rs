@@ -1,14 +1,14 @@
-﻿use axum::{
+use axum::{
+    Extension, Router,
     extract::{Path, Query},
     response::Json,
     routing::{get, post, put},
-    Extension, Router,
 };
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 
-use crate::{error::Result, services::auth::User, AppState};
+use crate::{AppState, error::Result, services::auth::User};
 
 pub fn router() -> Router {
     Router::new()

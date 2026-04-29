@@ -1,7 +1,7 @@
 use anyhow::Result;
 use argon2::{
-    password_hash::{rand_core::OsRng, SaltString},
     Argon2, PasswordHash, PasswordHasher, PasswordVerifier,
+    password_hash::{SaltString, rand_core::OsRng},
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -9,8 +9,8 @@ use std::fs;
 use std::path::Path;
 use surrealdb::opt::auth::Root;
 use surrealdb::{
-    engine::remote::http::{Client, Http},
     Surreal,
+    engine::remote::http::{Client, Http},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -219,11 +219,11 @@ pub mod wizard {
             println!("验证数据库连接...");
             // TODO: 这里可以添加实际的数据库连接验证
 
-            // 2. 更新Rainbow-Docs的.env文件
-            println!("更新Rainbow-Docs配置...");
+            // 2. 更新SoulBook的.env文件
+            println!("更新SoulBook配置...");
             let docs_env_path = ".env";
             let docs_env_content = format!(
-                r#"# Rainbow-Docs 配置
+                r#"# SoulBook 配置
 DATABASE_URL={}
 DATABASE_USER={}
 DATABASE_PASS={}
@@ -263,7 +263,7 @@ ENABLE_VERSIONING=true
             );
 
             fs::write(docs_env_path, docs_env_content)
-                .map_err(|e| anyhow::anyhow!("Failed to write Rainbow-Docs .env file: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("Failed to write SoulBook .env file: {}", e))?;
 
             // 3. 更新Rainbow-Auth的.env文件
             println!("更新Rainbow-Auth配置...");
@@ -345,7 +345,7 @@ ENABLE_VERSIONING=true
 
             // 创建一个简单的配置标记文件
             let config_content = format!(
-                r#"# Rainbow-Docs 安装配置
+                r#"# SoulBook 安装配置
 # 安装时间: {}
 # 管理员: {} ({})
 # 站点名称: {}

@@ -1,11 +1,11 @@
 use crate::config::Config;
 use crate::error::{AppError, Result};
 use crate::models::space::{
-    CreateSpaceRequest, Space, SpaceListQuery, SpaceListResponse, SpaceResponse, SpaceStats,
+    CreateSpaceRequest, Space, SpaceDb, SpaceListQuery, SpaceListResponse, SpaceResponse, SpaceStats,
     UpdateSpaceRequest,
 };
 use crate::services::auth::User;
-use crate::services::database::{record_id_key, Database};
+use crate::services::database::{Database, record_id_key};
 use serde_json::Value;
 use std::sync::Arc;
 use surrealdb::types::RecordId as Thing;
@@ -104,12 +104,12 @@ impl SpaceService {
                 map_create_space_db_error(e)
             })?;
 
-        let created_spaces: Vec<Space> = response.take(0).map_err(|e| {
+        let created_spaces: Vec<SpaceDb> = response.take(0).map_err(|e| {
             error!("Failed to decode created space: {}", e);
             map_create_space_db_error(e)
         })?;
 
-        let created_space = created_spaces.into_iter().next();
+        let created_space = created_spaces.into_iter().next().map(Space::from);
 
         let created_space = created_space.ok_or_else(|| {
             error!("Failed to get created space from database");
@@ -724,7 +724,10 @@ impl SpaceService {
 
         // 如果没有找到结果，尝试查看所有space_member记录进行调试
         if member_results.is_empty() {
-            info!("No member spaces found for cleaned user_id: {} (original: {}), checking all space_member records for debugging", clean_user_id, user_id);
+            info!(
+                "No member spaces found for cleaned user_id: {} (original: {}), checking all space_member records for debugging",
+                clean_user_id, user_id
+            );
             let all_members: Vec<surrealdb::types::Value> = self
                 .db
                 .client

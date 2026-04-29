@@ -7,7 +7,8 @@ use std::any::TypeId;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use surrealdb::types::{RecordId as Thing, RecordIdKey};
+use surrealdb::types::{RecordId as Thing, RecordIdKey, Value as SurrealValue};
+use surrealdb::IndexedResults;
 use tracing::{error, info};
 
 /// 客户端包装器，提供完全兼容的 SurrealDB API
@@ -417,7 +418,7 @@ impl ClientWrapper {
                 ));
             }
         };
-        let storage_id = soulcore::engines::storage::RecordId::new(table, id);
+        let storage_id = soulcore::engines::storage::RecordId { table, id };
 
         let deleted: Option<serde_json::Value> = self
             .storage
@@ -692,7 +693,7 @@ where
                     ));
                 }
             };
-            let storage_id = soulcore::engines::storage::RecordId::new(table, id);
+            let storage_id = soulcore::engines::storage::RecordId { table, id };
 
             let payload = serde_json::to_value(self.content)
                 .map_err(|e| surrealdb::Error::thrown(e.to_string()))?;

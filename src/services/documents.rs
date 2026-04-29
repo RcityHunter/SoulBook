@@ -1,12 +1,12 @@
 use chrono::Utc;
 use std::sync::Arc;
-use surrealdb::types::RecordId as Thing;
 use validator::Validate;
 
 use crate::{
     error::ApiError,
     models::document::{
-        CreateDocumentRequest, Document, DocumentMetadata, DocumentTreeNode, UpdateDocumentRequest,
+        CreateDocumentRequest, Document, DocumentDb, DocumentMetadata, DocumentTreeNode,
+        UpdateDocumentRequest,
     },
     models::version::{CreateVersionRequest, VersionChangeType},
     services::{
@@ -33,13 +33,55 @@ impl DocumentService {
             .to_string()
     }
 
+    fn normalize_space_id(raw: &str) -> String {
+        let trimmed = raw.trim();
+        let no_prefix = trimmed.strip_prefix("space:").unwrap_or(trimmed).trim();
+        no_prefix
+            .trim_matches(|c| c == '⟨' || c == '⟩' || c == '"' || c == '\'' || c == '`' || c == ' ')
+            .to_string()
+    }
+
+    fn space_record_id(space_id: &str) -> String {
+        format!("space:{}", Self::normalize_space_id(space_id))
+    }
+
+    fn document_record_id(document_id: &str) -> String {
+        format!("document:{}", Self::normalize_document_id(document_id))
+    }
+
+    fn extract_record_key(value: &serde_json::Value) -> Option<String> {
+        match value {
+            serde_json::Value::String(s) => Some(Self::normalize_document_id(s)),
+            serde_json::Value::Object(map) => {
+                if let Some(id) = map.get("id") {
+                    return Self::extract_record_key(id);
+                }
+                if let Some(key) = map.get("key") {
+                    return Self::extract_record_key(key);
+                }
+                if let Some(s) = map.get("String").and_then(|v| v.as_str()) {
+                    return Some(s.to_string());
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     fn document_select_fields() -> &'static str {
         "string::replace(type::string(id), 'document:', '') AS id, \
          string::replace(type::string(space_id), 'space:', '') AS space_id, \
          title, slug, content, excerpt, is_public, status, \
          (IF parent_id = NONE THEN NONE ELSE string::replace(type::string(parent_id), 'document:', '') END) AS parent_id, \
-         order_index, author_id, last_editor_id, view_count, word_count, reading_time, \
-         (metadata ?? {}) AS metadata, updated_by, is_deleted, deleted_at, deleted_by, created_at, updated_at"
+         order_index, \
+         (IF author_id = NONE THEN '' ELSE type::string(author_id) END) AS author_id, \
+         (IF last_editor_id = NONE THEN NONE ELSE type::string(last_editor_id) END) AS last_editor_id, \
+         view_count, word_count, reading_time, \
+         (metadata ?? {}) AS metadata, \
+         (IF updated_by = NONE THEN NONE ELSE type::string(updated_by) END) AS updated_by, \
+         is_deleted, deleted_at, \
+         (IF deleted_by = NONE THEN NONE ELSE type::string(deleted_by) END) AS deleted_by, \
+         created_at, updated_at"
     }
 
     fn normalize_status(status: Option<&str>, is_public: bool) -> String {
@@ -106,8 +148,6 @@ impl DocumentService {
         let limit = query.limit.unwrap_or(20);
         let offset = (page - 1) * limit;
 
-        let space_record = format!("space:{}", actual_space_id);
-
         // 查询文档列表
         let base_query = format!(
             "SELECT {} FROM document
@@ -120,7 +160,7 @@ impl DocumentService {
         let mut documents_query = self.db.client.query(base_query);
 
         documents_query = documents_query
-            .bind(("space_id", space_record.clone()))
+            .bind(("space_id", Self::space_record_id(actual_space_id)))
             .bind(("limit", limit))
             .bind(("offset", offset));
 
@@ -139,7 +179,7 @@ impl DocumentService {
                 .db
                 .client
                 .query(search_query)
-                .bind(("space_id", space_record.clone()))
+                .bind(("space_id", Self::space_record_id(actual_space_id)))
                 .bind(("search", search))
                 .bind(("limit", limit))
                 .bind(("offset", offset));
@@ -168,7 +208,7 @@ impl DocumentService {
             .db
             .client
             .query(all_query)
-            .bind(("space_id", space_record.clone()));
+            .bind(("space_id", Self::space_record_id(actual_space_id)));
 
         let mut all_docs_result = all_docs_query
             .await
@@ -282,30 +322,41 @@ impl DocumentService {
             .bind(("order_index", request.order_index.unwrap_or(0)));
 
         if let Some(parent_id) = &request.parent_id {
-            let actual_parent_id = parent_id
-                .strip_prefix("document:")
-                .unwrap_or(parent_id)
-                .trim_matches(|c| c == '⟨' || c == '⟩');
             query_builder =
-                query_builder.bind(("parent_id", format!("document:{}", actual_parent_id)));
+                query_builder.bind((
+                    "parent_id",
+                    format!("document:{}", Self::normalize_document_id(parent_id)),
+                ));
         }
 
         let mut result = query_builder
             .await
             .map_err(Self::map_document_write_error)?;
 
-        // Consume the raw CREATE result (RecordId fields can't deserialize directly as String)
-        let _: Vec<serde_json::Value> = result
+        let created_documents: Vec<serde_json::Value> = result
             .take(0)
             .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
 
-        // Fetch the created document using the proper SELECT with string field transformations
-        let created_document = self
-            .get_document_by_slug(actual_space_id, &request.slug)
-            .await
-            .map_err(|e| {
-                ApiError::InternalServerError(format!("Failed to retrieve created document: {}", e))
-            })?;
+        let created_id = created_documents
+            .into_iter()
+            .next()
+            .and_then(|raw| {
+                raw.get("id")
+                    .and_then(Self::extract_record_key)
+                    .or_else(|| Self::extract_record_key(&raw))
+            });
+
+        let created_document = match created_id {
+            Some(created_id) => self.get_document_by_id(&created_id).await?,
+            None => self
+                .get_document_by_slug(actual_space_id, &request.slug)
+                .await
+                .map_err(|_| {
+                    ApiError::InternalServerError(
+                        "Failed to decode created document id".to_string(),
+                    )
+                })?,
+        };
 
         // 更新搜索索引
         if let Some(search_service) = &self.search_service {
@@ -549,7 +600,7 @@ impl DocumentService {
             .db
             .client
             .query(query)
-            .bind(("space_id", format!("space:{}", space_id)))
+            .bind(("space_id", Self::space_record_id(space_id)))
             .bind(("limit", per_page))
             .bind(("offset", offset))
             .await
@@ -573,7 +624,7 @@ impl DocumentService {
             .db
             .client
             .query(query)
-            .bind(("parent_id", format!("document:{}", parent_id)))
+            .bind(("parent_id", Self::document_record_id(parent_id)))
             .await
             .map_err(|e| ApiError::DatabaseError(e.to_string()))?
             .take(0)
@@ -612,18 +663,47 @@ impl DocumentService {
             Self::document_select_fields()
         );
 
-        let space_record = format!("space:{}", actual_space_id);
+        let fallback_query = format!(
+            "SELECT {} FROM document
+             WHERE string::replace(type::string(space_id), 'space:', '') = $space_id
+             AND is_deleted = false
+             ORDER BY order_index ASC, created_at ASC",
+            Self::document_select_fields()
+        );
+
+        let space_record = Self::space_record_id(actual_space_id);
         tracing::debug!("Querying with space_record: {}", space_record);
 
-        let all_documents: Vec<Document> = self
+        let all_documents: Vec<Document> = match self
             .db
             .client
             .query(query)
-            .bind(("space_id", space_record))
+            .bind(("space_id", space_record.clone()))
             .await
-            .map_err(|e| ApiError::DatabaseError(e.to_string()))?
-            .take(0)
-            .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+        {
+            Ok(mut result) => result
+                .take(0)
+                .map_err(|e| ApiError::DatabaseError(e.to_string()))?,
+            Err(primary_err) => {
+                tracing::warn!(
+                    "Primary document tree query failed for {}: {}. Falling back to string-based space_id query.",
+                    space_record,
+                    primary_err
+                );
+
+                let mut fallback_result = self
+                    .db
+                    .client
+                    .query(fallback_query)
+                    .bind(("space_id", actual_space_id))
+                    .await
+                    .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+
+                fallback_result
+                    .take(0)
+                    .map_err(|e| ApiError::DatabaseError(e.to_string()))?
+            }
+        };
 
         tracing::debug!("Found {} documents in database", all_documents.len());
 
@@ -857,7 +937,7 @@ impl DocumentService {
             .db
             .client
             .query(query)
-            .bind(("space_id", format!("space:{}", space_id)))
+            .bind(("space_id", Self::space_record_id(space_id)))
             .bind(("slug", slug))
             .await
             .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
@@ -921,7 +1001,7 @@ impl DocumentService {
             .db
             .client
             .query(query)
-            .bind(("space_id", format!("space:{}", space_id)))
+            .bind(("space_id", Self::space_record_id(space_id)))
             .bind(("slug", slug))
             .await
             .map_err(|e| ApiError::DatabaseError(e.to_string()))?
@@ -953,8 +1033,8 @@ impl DocumentService {
             .db
             .client
             .query(query)
-            .bind(("parent_id", format!("document:{}", parent_id)))
-            .bind(("space_id", format!("space:{}", space_id)))
+            .bind(("parent_id", Self::document_record_id(parent_id)))
+            .bind(("space_id", Self::space_record_id(space_id)))
             .await
             .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
 

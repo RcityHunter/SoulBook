@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 use surrealdb::types::RecordId as Thing;
+use tracing::warn;
 
 use crate::{
     error::ApiError,
@@ -54,8 +55,8 @@ impl SearchService {
     ) -> Result<SearchResponse, ApiError> {
         let start_time = Instant::now();
 
-        let page = request.page.unwrap_or(1);
-        let per_page = request.per_page.unwrap_or(20);
+        let page = request.page.unwrap_or(1).max(1);
+        let per_page = request.per_page.unwrap_or(20).clamp(1, 100);
         let offset = (page - 1) * per_page;
 
         // 构建搜索查询
@@ -122,14 +123,28 @@ impl SearchService {
             db_query = db_query.bind((key, value));
         }
 
-        let search_indexes: Vec<SearchIndex> = db_query
-            .await
-            .map_err(|e| ApiError::Database(e))?
-            .take(0)
-            .map_err(|e| ApiError::Database(e))?;
+        let search_indexes: Vec<SearchIndex> = match db_query.await {
+            Ok(mut response) => match response.take(0) {
+                Ok(indexes) => indexes,
+                Err(e) => {
+                    warn!("search result parse failed: {}", e);
+                    Vec::new()
+                }
+            },
+            Err(e) => {
+                warn!("search query failed: {}", e);
+                Vec::new()
+            }
+        };
 
         // 获取总数
-        let total_count = self.get_search_count(user_id, &request).await?;
+        let total_count = self
+            .get_search_count(user_id, &request)
+            .await
+            .unwrap_or_else(|e| {
+                warn!("search count failed: {}", e);
+                0
+            });
 
         // 转换为搜索结果
         let mut results = Vec::new();
@@ -215,11 +230,10 @@ impl SearchService {
             db_query = db_query.bind((key, value));
         }
 
-        let result: Vec<serde_json::Value> = db_query
-            .await
-            .map_err(|e| ApiError::Database(e))?
-            .take(0)
-            .map_err(|e| ApiError::Database(e))?;
+        let result: Vec<serde_json::Value> = match db_query.await {
+            Ok(mut response) => response.take(0).map_err(|e| ApiError::Database(e))?,
+            Err(e) => return Err(ApiError::Database(e)),
+        };
 
         let count = result
             .first()
@@ -319,7 +333,7 @@ impl SearchService {
             LIMIT $limit
         ";
 
-        let results: Vec<SearchIndex> = self
+        let results: Vec<SearchIndex> = match self
             .db
             .client
             .query(query)
@@ -327,9 +341,19 @@ impl SearchService {
             .bind(("prefix", prefix))
             .bind(("limit", limit))
             .await
-            .map_err(|e| ApiError::Database(e))?
-            .take(0)
-            .map_err(|e| ApiError::Database(e))?;
+        {
+            Ok(mut response) => match response.take(0) {
+                Ok(results) => results,
+                Err(e) => {
+                    warn!("search suggestions result parse failed: {}", e);
+                    Vec::new()
+                }
+            },
+            Err(e) => {
+                warn!("search suggestions query failed: {}", e);
+                Vec::new()
+            }
+        };
 
         let mut suggestions = Vec::new();
 

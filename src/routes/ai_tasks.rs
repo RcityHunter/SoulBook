@@ -7,6 +7,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
+use tracing::warn;
 
 use crate::{error::Result, services::auth::User, AppState};
 
@@ -41,12 +42,10 @@ struct CreateTaskRequest {
 async fn list_tasks(
     Extension(app_state): Extension<Arc<AppState>>,
     Query(q): Query<TaskQuery>,
-    user: User,
+    _user: User,
 ) -> Result<Json<Value>> {
     let db = &app_state.db.client;
-    let page = q.page.unwrap_or(1).max(1);
-    let per_page = q.per_page.unwrap_or(20).min(100);
-    let offset = (page - 1) * per_page;
+    let (page, per_page, offset) = normalize_pagination(q.page, q.per_page);
 
     let mut conditions = vec!["is_deleted = false".to_string()];
     if let Some(ref s) = q.status {
@@ -65,22 +64,36 @@ async fn list_tasks(
         per_page,
         offset
     );
-    let mut result = db
-        .query(sql)
-        .await
-        .map_err(|e| crate::error::ApiError::DatabaseError(e.to_string()))?;
-    let items: Vec<Value> = result
-        .take(0)
-        .map_err(|e| crate::error::ApiError::DatabaseError(e.to_string()))?;
+    let items: Vec<Value> = match db.query(sql).await {
+        Ok(mut result) => match result.take(0) {
+            Ok(items) => items,
+            Err(e) => {
+                warn!("ai_tasks list result parse failed: {}", e);
+                Vec::new()
+            }
+        },
+        Err(e) => {
+            warn!("ai_tasks list query failed: {}", e);
+            Vec::new()
+        }
+    };
 
     // counts by status
-    let mut cnt = db
+    let counts: Vec<Value> = match db
         .query(
             "SELECT count() as total, status FROM ai_task WHERE is_deleted = false GROUP BY status",
         )
         .await
-        .map_err(|e| crate::error::ApiError::DatabaseError(e.to_string()))?;
-    let counts: Vec<Value> = cnt.take(0).unwrap_or_default();
+    {
+        Ok(mut cnt) => cnt.take(0).unwrap_or_else(|e| {
+            warn!("ai_tasks stats result parse failed: {}", e);
+            Vec::new()
+        }),
+        Err(e) => {
+            warn!("ai_tasks stats query failed: {}", e);
+            Vec::new()
+        }
+    };
 
     let mut running = 0i64;
     let mut completed = 0i64;
@@ -105,6 +118,13 @@ async fn list_tasks(
             "page": page, "per_page": per_page
         }
     })))
+}
+
+fn normalize_pagination(page: Option<i64>, per_page: Option<i64>) -> (i64, i64, i64) {
+    let page = page.unwrap_or(1).max(1);
+    let per_page = per_page.unwrap_or(20).clamp(1, 100);
+    let offset = (page - 1) * per_page;
+    (page, per_page, offset)
 }
 
 async fn create_task(
@@ -219,4 +239,16 @@ async fn update_task_status(
     Ok(Json(
         json!({ "success": true, "data": items.into_iter().next() }),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_pagination_clamps_page_and_per_page() {
+        assert_eq!(normalize_pagination(Some(-3), Some(-10)), (1, 1, 0));
+        assert_eq!(normalize_pagination(Some(2), Some(500)), (2, 100, 100));
+        assert_eq!(normalize_pagination(None, None), (1, 20, 0));
+    }
 }

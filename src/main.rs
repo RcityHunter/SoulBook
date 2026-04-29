@@ -1,12 +1,12 @@
-﻿use axum::{
+use axum::{
+    Extension,
     extract::Query,
     response::Html,
-    routing::{delete, get, post, Router},
-    Extension,
+    routing::{Router, delete, get, post},
 };
 use serde::Deserialize;
 use std::sync::Arc;
-use tokio::time::{interval, Duration};
+use tokio::time::{Duration, interval};
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tracing::{info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -42,7 +42,7 @@ async fn main() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    info!("Starting Rainbow-Docs service...");
+    info!("Starting SoulBook service...");
 
     // 加载配置
     dotenv::dotenv().ok();
@@ -111,7 +111,9 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    info!("Database connection established. Please ensure database schema is initialized with docs_schema.sql");
+    info!(
+        "Database connection established. Please ensure database schema is initialized with docs_schema.sql"
+    );
 
     // 创建共享的数据库实例
     let shared_db = Arc::new(db.clone());
@@ -171,8 +173,14 @@ async fn main() -> anyhow::Result<()> {
     let app_state = Arc::new(app_state);
 
     // 创建路由
+    let auth_router = if config.auth.integration_mode {
+        routes::auth_gateway::router()
+    } else {
+        routes::local_auth::router()
+    };
+
     let mut app = Router::new()
-        .nest("/api/auth", routes::local_auth::router()) // 本地登录注册
+        .nest("/api/auth", auth_router)
         .nest("/api/docs/agent", agent::router::router())
         .nest("/api/docs/auth", routes::auth::router())
         .nest("/api/docs/spaces", routes::spaces::router())
@@ -219,7 +227,7 @@ async fn main() -> anyhow::Result<()> {
 
     // 启动服务器
     let addr = format!("{}:{}", config.server.host, config.server.port);
-    info!("Rainbow-Docs server listening on {}", addr);
+    info!("SoulBook server listening on {}", addr);
     axum::Server::bind(&addr.parse()?)
         .serve(app.into_make_service())
         .await?;
@@ -287,6 +295,7 @@ async fn sso_bridge(
         localStorage.setItem('jwt_token', token);
         localStorage.setItem('auth_token', token);
         localStorage.setItem('token', token);
+        localStorage.setItem('souldoc_token', token);
         localStorage.setItem('soulbook_token', token);
       }} catch (e) {{
         // ignore storage errors
@@ -407,7 +416,7 @@ async fn start_installer_only_mode(config: Config) -> anyhow::Result<()> {
 
     // 启动服务器
     let addr = "0.0.0.0:3000";
-    info!("Rainbow-Docs installer-only mode listening on {}", addr);
+    info!("SoulBook installer-only mode listening on {}", addr);
     axum::Server::bind(&addr.parse()?)
         .serve(app.into_make_service())
         .await?;

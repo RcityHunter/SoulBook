@@ -2,13 +2,13 @@
 
 ## 概述
 
-Rainbow-Docs 向量存储功能为文档系统提供了语义搜索和AI应用支持。系统作为一个向量化文档数据库，专注于向量的存储和检索，而向量的生成由调用方负责。
+SoulBook 向量存储功能为文档系统提供了语义搜索和 AI 应用支持。系统作为一个向量化文档数据库，专注于向量的存储和检索，而向量的生成由调用方负责。
 
 ## 架构设计
 
 ### 核心理念
 
-1. **职责分离**: Rainbow-Docs 专注于向量存储和检索，不负责向量生成
+1. **职责分离**: SoulBook 专注于向量存储和检索，不负责向量生成
 2. **灵活性**: 调用者可以使用任何嵌入模型（OpenAI、文心、通义等）
 3. **简单性**: 提供清晰的 RESTful API 接口
 4. **独立性**: 向量功能与现有关键词搜索完全独立
@@ -266,7 +266,7 @@ results = requests.post(
 
 ### 1. 选择嵌入模型
 
-Rainbow-Docs 不限制嵌入模型的选择，你可以使用：
+SoulBook 不限制嵌入模型的选择，你可以使用：
 
 - **OpenAI**: text-embedding-ada-002, text-embedding-3-small, text-embedding-3-large
 - **文心一言**: Embedding-V1
@@ -298,7 +298,7 @@ onDocumentChange(async (doc) => {
 
 ### 3. 混合搜索实现
 
-虽然 Rainbow-Docs 的向量搜索和关键词搜索是独立的，但你可以在应用层实现混合搜索：
+虽然 SoulBook 的向量搜索和关键词搜索是独立的，但你可以在应用层实现混合搜索：
 
 ```javascript
 async function hybridSearch(query, options = {}) {
@@ -363,7 +363,7 @@ for (const doc of documents) {
 
 ## 常见问题
 
-### Q: 为什么 Rainbow-Docs 不内置向量生成功能？
+### Q: 为什么 SoulBook 不内置向量生成功能？
 
 A: 这样设计有几个优势：
 - 调用者可以自由选择任何嵌入模型
@@ -373,7 +373,7 @@ A: 这样设计有几个优势：
 
 ### Q: 如何处理不同维度的向量？
 
-A: Rainbow-Docs 支持存储不同维度的向量，但建议在同一个空间内使用相同维度的向量以获得最佳搜索效果。
+A: SoulBook 支持存储不同维度的向量，但建议在同一个空间内使用相同维度的向量以获得最佳搜索效果。
 
 ### Q: 向量搜索的性能如何？
 
