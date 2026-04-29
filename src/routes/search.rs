@@ -10,7 +10,7 @@ use std::sync::Arc;
 use crate::{
     error::ApiError,
     models::search::{SearchRequest, SearchResponse},
-    services::{auth::AuthService, search::SearchService},
+    services::auth::User,
 };
 
 #[derive(Deserialize)]
@@ -45,13 +45,13 @@ pub struct ReindexResponse {
 pub async fn search_documents(
     Query(query): Query<SearchQuery>,
     Extension(app_state): Extension<Arc<crate::AppState>>,
-    Extension(user_id): Extension<String>,
+    user: User,
 ) -> Result<Json<SearchResponse>, ApiError> {
     let search_service = &app_state.search_service;
     let auth_service = &app_state.auth_service;
     // 检查基本搜索权限
     auth_service
-        .check_permission(&user_id, "docs.read", None)
+        .check_permission(&user.id, "docs.read", None)
         .await?;
 
     // 解析标签
@@ -77,7 +77,7 @@ pub async fn search_documents(
         sort_by,
     };
 
-    let response = search_service.search(&user_id, search_request).await?;
+    let response = search_service.search(&user.id, search_request).await?;
 
     Ok(Json(response))
 }
@@ -85,17 +85,17 @@ pub async fn search_documents(
 pub async fn search_suggestions(
     Query(query): Query<SuggestQuery>,
     Extension(app_state): Extension<Arc<crate::AppState>>,
-    Extension(user_id): Extension<String>,
+    user: User,
 ) -> Result<Json<SuggestResponse>, ApiError> {
     let search_service = &app_state.search_service;
     let auth_service = &app_state.auth_service;
     auth_service
-        .check_permission(&user_id, "docs.read", None)
+        .check_permission(&user.id, "docs.read", None)
         .await?;
 
     let limit = query.limit.unwrap_or(10);
     let suggestions = search_service
-        .suggest_search_terms(&user_id, &query.q, limit)
+        .suggest_search_terms(&user.id, &query.q, limit)
         .await?;
 
     Ok(Json(SuggestResponse {
@@ -106,13 +106,13 @@ pub async fn search_suggestions(
 
 pub async fn reindex_documents(
     Extension(app_state): Extension<Arc<crate::AppState>>,
-    Extension(user_id): Extension<String>,
+    user: User,
 ) -> Result<Json<ReindexResponse>, ApiError> {
     let search_service = &app_state.search_service;
     let auth_service = &app_state.auth_service;
     // 只有文档管理员可以重建索引
     auth_service
-        .check_permission(&user_id, "docs.admin", None)
+        .check_permission(&user.id, "docs.admin", None)
         .await?;
 
     let indexed_count = search_service.bulk_reindex().await?;
@@ -127,13 +127,13 @@ pub async fn search_within_space(
     axum::extract::Path(space_id): axum::extract::Path<String>,
     Query(mut query): Query<SearchQuery>,
     Extension(app_state): Extension<Arc<crate::AppState>>,
-    Extension(user_id): Extension<String>,
+    user: User,
 ) -> Result<Json<SearchResponse>, ApiError> {
     let search_service = &app_state.search_service;
     let auth_service = &app_state.auth_service;
     // 检查空间访问权限
     auth_service
-        .check_permission(&user_id, "docs.read", Some(&space_id))
+        .check_permission(&user.id, "docs.read", Some(&space_id))
         .await?;
 
     // 强制设置空间ID
@@ -160,7 +160,7 @@ pub async fn search_within_space(
         sort_by,
     };
 
-    let response = search_service.search(&user_id, search_request).await?;
+    let response = search_service.search(&user.id, search_request).await?;
 
     Ok(Json(response))
 }
@@ -168,12 +168,12 @@ pub async fn search_within_space(
 pub async fn search_by_tags(
     Query(query): Query<SearchQuery>,
     Extension(app_state): Extension<Arc<crate::AppState>>,
-    Extension(user_id): Extension<String>,
+    user: User,
 ) -> Result<Json<SearchResponse>, ApiError> {
     let search_service = &app_state.search_service;
     let auth_service = &app_state.auth_service;
     auth_service
-        .check_permission(&user_id, "docs.read", None)
+        .check_permission(&user.id, "docs.read", None)
         .await?;
 
     // 确保有标签查询
@@ -197,7 +197,7 @@ pub async fn search_by_tags(
         sort_by: Some(crate::models::search::SearchSortBy::Relevance),
     };
 
-    let response = search_service.search(&user_id, search_request).await?;
+    let response = search_service.search(&user.id, search_request).await?;
 
     Ok(Json(response))
 }
