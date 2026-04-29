@@ -36,11 +36,11 @@ pub async fn search_documents(
     Extension(app_state): Extension<Arc<crate::AppState>>,
     user: User,
 ) -> Result<Json<Value>, ApiError> {
+    let user_id = user.id;
     let search_service = &app_state.search_service;
     let auth_service = &app_state.auth_service;
-    // 检查基本搜索权限
     auth_service
-        .check_permission(&user.id, "docs.read", None)
+        .check_permission(&user_id, "docs.read", None)
         .await?;
 
     // 解析标签
@@ -66,7 +66,7 @@ pub async fn search_documents(
         sort_by,
     };
 
-    let response = search_service.search(&user.id, search_request).await?;
+    let response = search_service.search(&user_id, search_request).await?;
 
     Ok(Json(search_response_payload(response)))
 }
@@ -76,15 +76,16 @@ pub async fn search_suggestions(
     Extension(app_state): Extension<Arc<crate::AppState>>,
     user: User,
 ) -> Result<Json<Value>, ApiError> {
+    let user_id = user.id;
     let search_service = &app_state.search_service;
     let auth_service = &app_state.auth_service;
     auth_service
-        .check_permission(&user.id, "docs.read", None)
+        .check_permission(&user_id, "docs.read", None)
         .await?;
 
     let limit = query.limit.unwrap_or(10);
     let suggestions = search_service
-        .suggest_search_terms(&user.id, &query.q, limit)
+        .suggest_search_terms(&user_id, &query.q, limit)
         .await?;
 
     Ok(Json(json!({
@@ -98,11 +99,12 @@ pub async fn reindex_documents(
     Extension(app_state): Extension<Arc<crate::AppState>>,
     user: User,
 ) -> Result<Json<Value>, ApiError> {
+    let user_id = user.id;
     let search_service = &app_state.search_service;
     let auth_service = &app_state.auth_service;
     // 只有文档管理员可以重建索引
     auth_service
-        .check_permission(&user.id, "docs.admin", None)
+        .check_permission(&user_id, "docs.admin", None)
         .await?;
 
     let indexed_count = search_service.bulk_reindex().await?;
@@ -122,11 +124,12 @@ pub async fn search_within_space(
     Extension(app_state): Extension<Arc<crate::AppState>>,
     user: User,
 ) -> Result<Json<Value>, ApiError> {
+    let user_id = user.id;
     let search_service = &app_state.search_service;
     let auth_service = &app_state.auth_service;
     // 检查空间访问权限
     auth_service
-        .check_permission(&user.id, "docs.read", Some(&space_id))
+        .check_permission(&user_id, "docs.read", Some(&space_id))
         .await?;
 
     // 强制设置空间ID
@@ -153,7 +156,7 @@ pub async fn search_within_space(
         sort_by,
     };
 
-    let response = search_service.search(&user.id, search_request).await?;
+    let response = search_service.search(&user_id, search_request).await?;
 
     Ok(Json(search_response_payload(response)))
 }
@@ -163,10 +166,11 @@ pub async fn search_by_tags(
     Extension(app_state): Extension<Arc<crate::AppState>>,
     user: User,
 ) -> Result<Json<Value>, ApiError> {
+    let user_id = user.id;
     let search_service = &app_state.search_service;
     let auth_service = &app_state.auth_service;
     auth_service
-        .check_permission(&user.id, "docs.read", None)
+        .check_permission(&user_id, "docs.read", None)
         .await?;
 
     // 确保有标签查询
@@ -190,7 +194,7 @@ pub async fn search_by_tags(
         sort_by: Some(crate::models::search::SearchSortBy::Relevance),
     };
 
-    let response = search_service.search(&user.id, search_request).await?;
+    let response = search_service.search(&user_id, search_request).await?;
 
     Ok(Json(search_response_payload(response)))
 }

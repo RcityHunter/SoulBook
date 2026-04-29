@@ -531,3 +531,15 @@ DEFINE FIELD updated_at ON document_vector TYPE datetime DEFAULT time::now();
 DEFINE INDEX idx_document_vector_doc ON document_vector FIELDS document_id;
 DEFINE INDEX idx_document_vector_space ON document_vector FIELDS space_id;
 DEFINE INDEX idx_document_vector_created ON document_vector FIELDS created_at;
+
+-- =====================================
+-- 本地认证用户表
+-- =====================================
+DEFINE TABLE local_user SCHEMAFULL;
+DEFINE FIELD email ON local_user TYPE string;
+DEFINE FIELD username ON local_user TYPE option<string>;
+DEFINE FIELD password_hash ON local_user TYPE string;
+DEFINE FIELD avatar_url ON local_user TYPE option<string>;
+DEFINE FIELD created_at ON local_user TYPE datetime DEFAULT time::now();
+DEFINE FIELD updated_at ON local_user TYPE datetime DEFAULT time::now();
+DEFINE INDEX local_user_email_unique ON local_user COLUMNS email UNIQUE;

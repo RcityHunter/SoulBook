@@ -71,7 +71,7 @@ impl SearchService {
         // 添加查询条件
         if !request.query.is_empty() {
             query_parts
-                .push("AND (title CONTAINSTEXT $query OR content CONTAINSTEXT $query)".to_string());
+                .push("AND (string::contains(string::lowercase(title), string::lowercase($query)) OR string::contains(string::lowercase(content), string::lowercase($query)))".to_string());
             bindings.push(("query".to_string(), request.query.clone()));
         }
 
@@ -104,7 +104,7 @@ impl SearchService {
         // 排序
         let sort_clause = match request.sort_by.as_ref().unwrap_or(&SearchSortBy::Relevance) {
             SearchSortBy::Relevance => {
-                "ORDER BY (title CONTAINSTEXT $query) DESC, last_updated DESC"
+                "ORDER BY last_updated DESC"
             }
             SearchSortBy::CreatedAt => "ORDER BY id DESC",
             SearchSortBy::UpdatedAt => "ORDER BY last_updated DESC",
@@ -192,7 +192,7 @@ impl SearchService {
 
         if !request.query.is_empty() {
             query_parts
-                .push("AND (title CONTAINSTEXT $query OR content CONTAINSTEXT $query)".to_string());
+                .push("AND (string::contains(string::lowercase(title), string::lowercase($query)) OR string::contains(string::lowercase(content), string::lowercase($query)))".to_string());
             bindings.push(("query".to_string(), request.query.clone()));
         }
 
@@ -327,9 +327,9 @@ impl SearchService {
         limit: i64,
     ) -> Result<Vec<String>, ApiError> {
         let query = "
-            SELECT title, tags FROM search_index 
-            WHERE is_public = true OR author_id = $user_id
-            AND title CONTAINSTEXT $prefix
+            SELECT title, tags FROM search_index
+            WHERE (is_public = true OR author_id = $user_id)
+            AND string::contains(string::lowercase(title), string::lowercase($prefix))
             LIMIT $limit
         ";
 

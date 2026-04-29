@@ -35,7 +35,7 @@ pub fn record_id_key(id: &Thing) -> String {
 }
 
 pub struct Response {
-    inner: IndexedResults,
+    inner: surrealdb::IndexedResults,
 }
 
 pub enum TakeIndex {
@@ -68,7 +68,7 @@ impl From<(usize, String)> for TakeIndex {
 }
 
 impl Response {
-    pub fn new(inner: IndexedResults) -> Self {
+    pub fn new(inner: surrealdb::IndexedResults) -> Self {
         Self { inner }
     }
 
@@ -78,21 +78,19 @@ impl Response {
     ) -> std::result::Result<T, surrealdb::Error> {
         match index.into() {
             TakeIndex::Statement(idx) => {
-                let raw: SurrealValue = self
+                let surreal_val: surrealdb::types::Value = self
                     .inner
                     .take(idx)
                     .map_err(|e| surrealdb::Error::thrown(e.to_string()))?;
-                let raw =
-                    serde_json::to_value(raw).map_err(|e| surrealdb::Error::thrown(e.to_string()))?;
+                let raw = surreal_val.into_json_value();
                 decode_take_value::<T>(raw)
             }
             TakeIndex::Field(stmt_idx, field) => {
-                let raw: SurrealValue = self
+                let surreal_val: surrealdb::types::Value = self
                     .inner
                     .take(stmt_idx)
                     .map_err(|e| surrealdb::Error::thrown(e.to_string()))?;
-                let raw =
-                    serde_json::to_value(raw).map_err(|e| surrealdb::Error::thrown(e.to_string()))?;
+                let raw = surreal_val.into_json_value();
                 let extracted = raw.get(&field).cloned().unwrap_or(serde_json::Value::Null);
                 decode_take_value::<T>(extracted)
             }
@@ -349,7 +347,7 @@ impl ClientWrapper {
         let resource_id = resource.into();
         match resource_id {
             ResourceId::Record(table, id) => {
-                // 单条记录查询，必须按 record-id 读取，避免把 `table:id` 误当作 table 名
+                // 单条记录查询，必须按 record-id 读取
                 let mut res = self
                     .storage
                     .query_with_params(
@@ -361,11 +359,10 @@ impl ClientWrapper {
                     .await
                     .map_err(|e| surrealdb::Error::thrown(e.to_string()))?;
 
-                let raw: SurrealValue = res
-                    .take(0)
+                let surreal_val: surrealdb::types::Value = res
+                    .take(0usize)
                     .map_err(|e| surrealdb::Error::thrown(e.to_string()))?;
-                let raw =
-                    serde_json::to_value(raw).map_err(|e| surrealdb::Error::thrown(e.to_string()))?;
+                let raw = surreal_val.into_json_value();
                 let rows: Vec<serde_json::Value> = match raw {
                     serde_json::Value::Array(arr) => arr,
                     serde_json::Value::Null => vec![],
@@ -374,13 +371,11 @@ impl ClientWrapper {
                 let result: Option<serde_json::Value> =
                     rows.into_iter().next().map(detag_surreal_json);
 
-                // 如果T是Option<U>，直接返回；否则尝试转换
                 serde_json::to_value(result)
                     .and_then(serde_json::from_value)
                     .map_err(|e| surrealdb::Error::thrown(e.to_string()))
             }
             ResourceId::Table(table) => {
-                // 表查询，返回 Vec<T>
                 let result: Vec<serde_json::Value> = self
                     .storage
                     .select(&table)
@@ -401,7 +396,7 @@ impl ClientWrapper {
         CreateWrapper::new(self.storage.clone(), resource.into())
     }
 
-    /// Update - 返回兼容的builder  
+    /// Update - 返回兼容的builder
     pub fn update(&self, resource: impl Into<ResourceId>) -> UpdateWrapper {
         UpdateWrapper::new(self.storage.clone(), resource.into())
     }
@@ -725,13 +720,11 @@ where
 pub struct Database {
     pub client: ClientWrapper,
     pub config: Config,
-    // 核心：soulcore存储引擎
     storage: Arc<soulcore::engines::storage::StorageEngine>,
 }
 
 impl Database {
     pub async fn new(config: &Config) -> Result<Self> {
-        // 构建soulcore配置
         let soulcore_config = soulcore::config::StorageConfig {
             connection_mode: soulcore::config::ConnectionMode::Http,
             url: config.database.url.clone(),
@@ -746,7 +739,6 @@ impl Database {
             retry_delay_ms: 1000,
         };
 
-        // 创建soulcore存储引擎
         let storage = Arc::new(
             soulcore::engines::storage::StorageEngine::new(soulcore_config)
                 .await
@@ -756,26 +748,20 @@ impl Database {
                 })?,
         );
 
-        // 验证连接
-        let test_client = storage.get_connection().await.map_err(|e| {
-            error!("Failed to get database connection: {}", e);
-            AppError::Internal(anyhow::anyhow!("Database connection failed: {}", e))
-        })?;
-
-        test_client.verify_connection().await.map_err(|e| {
-            error!("Failed to verify database connection: {}", e);
-            AppError::Internal(anyhow::anyhow!(
-                "Database connection verification failed: {}",
-                e
-            ))
-        })?;
+        // Verify connection with a simple query
+        storage
+            .query("RETURN 1")
+            .await
+            .map_err(|e| {
+                error!("Failed to verify database connection: {}", e);
+                AppError::Internal(anyhow::anyhow!("Database connection failed: {}", e))
+            })?;
 
         info!(
             "Successfully connected to SurrealDB via soulcore at {}",
             config.database.url
         );
 
-        // 创建客户端包装器
         let client = ClientWrapper {
             storage: storage.clone(),
         };
@@ -788,16 +774,13 @@ impl Database {
     }
 
     pub async fn verify_connection(&self) -> Result<()> {
-        // 使用soulcore验证连接
-        let client = self.storage.get_connection().await.map_err(|e| {
-            error!("Failed to get connection for verification: {}", e);
-            AppError::Internal(anyhow::anyhow!("Connection verification failed: {}", e))
-        })?;
-
-        client.verify_connection().await.map_err(|e| {
-            error!("Database connection verification failed: {}", e);
-            AppError::Internal(anyhow::anyhow!("Connection verification failed: {}", e))
-        })?;
+        self.storage
+            .query("RETURN 1")
+            .await
+            .map_err(|e| {
+                error!("Database connection verification failed: {}", e);
+                AppError::Internal(anyhow::anyhow!("Connection verification failed: {}", e))
+            })?;
 
         info!("Database connection verified successfully");
         Ok(())
@@ -809,8 +792,6 @@ impl Database {
         match self.verify_connection().await {
             Ok(_) => {
                 let response_time = start.elapsed();
-                let _pool_stats = self.storage.get_pool_stats();
-
                 Ok(DatabaseHealth {
                     connected: true,
                     response_time_ms: response_time.as_millis() as u64,
@@ -828,19 +809,8 @@ impl Database {
         }
     }
 
-    // 获取soulcore存储引擎（供需要高级功能的地方使用）
     pub fn storage(&self) -> &Arc<soulcore::engines::storage::StorageEngine> {
         &self.storage
-    }
-
-    // 使用soulcore查询构建器
-    pub fn query_builder(&self) -> soulcore::surrealdb::QueryBuilder {
-        self.storage.query_builder()
-    }
-
-    // 获取连接池统计
-    pub fn get_pool_stats(&self) -> soulcore::surrealdb::connection_pool::PoolStats {
-        self.storage.get_pool_stats()
     }
 }
 

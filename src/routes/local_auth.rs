@@ -65,10 +65,10 @@ struct ChangePasswordRequest {
     new_password: String,
 }
 
-fn issue_token(user_id: &str, secret: &str, expiry_days: i64) -> Result<String> {
+fn issue_token(user_id: &str, secret: &str, expiry_seconds: i64) -> Result<String> {
     let claims = Claims {
         sub: user_id.to_string(),
-        exp: (Utc::now() + Duration::days(expiry_days)).timestamp(),
+        exp: (Utc::now() + Duration::seconds(expiry_seconds)).timestamp(),
         iat: Utc::now().timestamp(),
         session_id: None,
     };
@@ -107,7 +107,7 @@ async fn login(
     let mut result = app_state
         .db
         .client
-        .query("SELECT * FROM local_user WHERE email = $email LIMIT 1")
+        .query("SELECT type::string(id) AS id, email, username, password_hash, avatar_url, created_at FROM local_user WHERE email = $email LIMIT 1")
         .bind(("email", &email))
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?;
@@ -125,12 +125,19 @@ async fn login(
         return Err(AppError::Authentication("邮箱或密码不正确".to_string()));
     }
 
-    let user_id = user
+    let raw_id = user
         .id
         .as_deref()
         .unwrap_or("unknown")
         .replace("local_user:", "");
-    let token = issue_token(&user_id, &app_state.config.auth.jwt_secret, 7)?;
+    let user_id = raw_id
+        .trim_matches(|c: char| c == '`' || c == '⟨' || c == '⟩' || c == '"' || c == ' ')
+        .to_string();
+    let token = issue_token(
+        &user_id,
+        &app_state.config.auth.jwt_secret,
+        app_state.config.auth.jwt_expiration as i64,
+    )?;
 
     Ok(Json(json!({
         "success": true,
@@ -182,7 +189,7 @@ async fn register(
         .client
         .query(
             "CREATE local_user SET
-                id = type::thing('local_user', $user_id),
+                id = type::record('local_user', $user_id),
                 email = $email,
                 username = $username,
                 password_hash = $hash,
@@ -215,7 +222,7 @@ async fn me(Extension(app_state): Extension<Arc<AppState>>, user: User) -> Resul
     let mut result = app_state
         .db
         .client
-        .query("SELECT * FROM local_user WHERE id = type::thing('local_user', $id) LIMIT 1")
+        .query("SELECT type::string(id) AS id, email, username, password_hash, avatar_url, created_at FROM local_user WHERE id = type::record('local_user', $id) LIMIT 1")
         .bind(("id", &user.id))
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?;
@@ -252,7 +259,7 @@ async fn update_profile(
         .client
         .query(
             "UPDATE local_user SET username = $username, avatar_url = $avatar_url
-             WHERE id = type::thing('local_user', $id)",
+             WHERE id = type::record('local_user', $id)",
         )
         .bind(("id", &user.id))
         .bind(("username", req.username.as_deref().unwrap_or("")))
@@ -275,7 +282,7 @@ async fn change_password(
     let mut result = app_state
         .db
         .client
-        .query("SELECT password_hash FROM local_user WHERE id = type::thing('local_user', $id) LIMIT 1")
+        .query("SELECT type::string(id) AS id, email, username, password_hash, avatar_url, created_at FROM local_user WHERE id = type::record('local_user', $id) LIMIT 1")
         .bind(("id", &user.id))
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?;
@@ -296,7 +303,7 @@ async fn change_password(
         .db
         .client
         .query(
-            "UPDATE local_user SET password_hash = $hash WHERE id = type::thing('local_user', $id)",
+            "UPDATE local_user SET password_hash = $hash WHERE id = type::record('local_user', $id)",
         )
         .bind(("id", &user.id))
         .bind(("hash", &new_hash))

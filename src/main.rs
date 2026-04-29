@@ -7,7 +7,7 @@ use axum::{
 use serde::Deserialize;
 use std::sync::Arc;
 use tokio::time::{Duration, interval};
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tracing::{info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -222,10 +222,7 @@ async fn main() -> anyhow::Result<()> {
         .layer(Extension(config.clone()))
         .layer(Extension(auth_service.clone()))
         .layer(
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any),
+            build_cors_layer(),
         );
 
     // 启动服务器
@@ -236,6 +233,31 @@ async fn main() -> anyhow::Result<()> {
         .await?;
 
     Ok(())
+}
+
+/// Build CORS layer from `CORS_ALLOWED_ORIGINS` env var.
+/// Empty/unset → allow any origin (dev fallback). Comma-separated list → strict whitelist.
+fn build_cors_layer() -> CorsLayer {
+    let allow_origin = match std::env::var("CORS_ALLOWED_ORIGINS").ok().filter(|s| !s.trim().is_empty()) {
+        Some(raw) => {
+            let origins: Vec<_> = raw
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .filter_map(|s| s.parse().ok())
+                .collect();
+            info!("CORS whitelist active: {} origins", origins.len());
+            AllowOrigin::list(origins)
+        }
+        None => {
+            warn!("CORS_ALLOWED_ORIGINS not set — allowing any origin (DEV ONLY)");
+            AllowOrigin::any()
+        }
+    };
+    CorsLayer::new()
+        .allow_origin(allow_origin)
+        .allow_methods(Any)
+        .allow_headers(Any)
 }
 
 #[derive(Deserialize)]
@@ -310,21 +332,25 @@ async fn auto_start_database(config: &Config) -> anyhow::Result<()> {
     let database_url = config.database.url.clone();
 
     // 构建启动命令
+    // Strip scheme from bind URL — surreal start expects "host:port", not "http://host:port"
+    let bind_addr = database_url
+        .trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .to_string();
+
     let mut cmd = Command::new("surreal");
     cmd.arg("start")
-        .arg("--auth")
-        .arg("--user")
+        .arg("--username")
         .arg(&database_user)
-        .arg("--pass")
+        .arg("--password")
         .arg(&database_pass)
         .arg("--bind")
-        .arg(&database_url)
-        .arg(format!("file://{}", db_file));
+        .arg(&bind_addr)
+        .arg(format!("file:{}", db_file));
 
-    // 在后台启动数据库
     info!(
-        "Executing: surreal start --auth --user {} --pass *** --bind {} file://{}",
-        database_user, database_url, db_file
+        "Executing: surreal start --username {} --password *** --bind {} file:{}",
+        database_user, bind_addr, db_file
     );
 
     let child = cmd.spawn().map_err(|e| {
@@ -385,10 +411,7 @@ async fn start_installer_only_mode(config: Config) -> anyhow::Result<()> {
         .nest("/api/install", installer_routes())
         .layer(Extension(config))
         .layer(
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any),
+            build_cors_layer(),
         );
 
     // 启动服务器

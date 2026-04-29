@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::{AppState, error::Result, services::auth::User};
+use crate::{AppState, error::Result, services::auth::User, utils::auth::require_admin};
 
 pub fn router() -> Router {
     Router::new()
@@ -21,6 +21,10 @@ pub fn router() -> Router {
         .route("/webhooks/:id/logs", get(webhook_logs))
         .route("/ai-users", get(list_ai_users))
         .route("/manifest", get(get_manifest))
+        // Agent registration management (admin only)
+        .route("/agent-requests", get(list_agent_requests))
+        .route("/agent-requests/:id/approve", post(approve_agent_request))
+        .route("/agent-requests/:id/reject", post(reject_agent_request))
 }
 
 #[derive(Deserialize)]
@@ -277,10 +281,191 @@ async fn get_manifest(Extension(_app_state): Extension<Arc<AppState>>) -> Json<V
     }))
 }
 
+// ── Agent registration management (admin) ────────────────────────────────────
+
+async fn list_agent_requests(
+    Extension(app_state): Extension<Arc<AppState>>,
+    user: User,
+) -> Result<Json<Value>> {
+    require_admin(&user)?;
+
+    let db = &app_state.db.client;
+    let mut result = db
+        .query("SELECT * FROM agent_registration ORDER BY created_at DESC")
+        .await
+        .map_err(|e| crate::error::ApiError::DatabaseError(e.to_string()))?;
+    let items: Vec<Value> = result
+        .take(0)
+        .map_err(|e| crate::error::ApiError::DatabaseError(e.to_string()))?;
+    Ok(Json(json!({ "success": true, "data": { "items": items } })))
+}
+
+async fn approve_agent_request(
+    Extension(app_state): Extension<Arc<AppState>>,
+    Path(reg_id): Path<String>,
+    user: User,
+) -> Result<Json<Value>> {
+    require_admin(&user)?;
+
+    let db = &app_state.db.client;
+    let now = chrono::Utc::now().to_rfc3339();
+
+    // Fetch pending registration
+    let mut res = db
+        .query("SELECT * FROM agent_registration WHERE reg_id = $id AND status = 'pending' LIMIT 1")
+        .bind(("id", &reg_id))
+        .await
+        .map_err(|e| crate::error::ApiError::DatabaseError(e.to_string()))?;
+    let items: Vec<Value> = res
+        .take(0)
+        .map_err(|e| crate::error::ApiError::DatabaseError(e.to_string()))?;
+    let record = items
+        .into_iter()
+        .next()
+        .ok_or_else(|| crate::error::ApiError::NotFound("申请不存在或已处理".to_string()))?;
+
+    let agent_name = record
+        .get("agent_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("AI Agent");
+    let email = record
+        .get("contact_email")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    // Create AI user account (password locked — login via API key only)
+    let username = format!("agent-{}", &reg_id[..8]);
+    let mut user_res = db
+        .query(
+            "CREATE user SET
+                username     = $username,
+                email        = $email,
+                display_name = $name,
+                password_hash = $phash,
+                is_ai        = true,
+                is_deleted   = false,
+                role         = 'agent',
+                created_at   = $now,
+                updated_at   = $now",
+        )
+        .bind(("username", &username))
+        .bind(("email", email))
+        .bind(("name", agent_name))
+        .bind(("phash", format!("locked-agent-{}", &reg_id)))
+        .bind(("now", &now))
+        .await
+        .map_err(|e| crate::error::ApiError::DatabaseError(e.to_string()))?;
+
+    let users: Vec<Value> = user_res
+        .take(0)
+        .map_err(|e| crate::error::ApiError::DatabaseError(e.to_string()))?;
+    let created = users
+        .into_iter()
+        .next()
+        .ok_or_else(|| crate::error::ApiError::DatabaseError("创建用户失败".to_string()))?;
+    let user_id = created
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    // Create API key (raw key stored temporarily in registration record)
+    let raw_key = format!("sk-sb-{}", Uuid::new_v4().to_string().replace('-', ""));
+    let prefix = raw_key[..12].to_string();
+
+    db.query(
+        "CREATE api_key SET
+            name        = $name,
+            key_hash    = $key_hash,
+            key_prefix  = $prefix,
+            scopes      = ['read', 'write'],
+            created_by  = $uid,
+            is_deleted  = false,
+            last_used_at = NONE,
+            created_at  = $now,
+            updated_at  = $now",
+    )
+    .bind(("name", format!("{} API Key", agent_name)))
+    .bind(("key_hash", sha256_hex(&raw_key)))
+    .bind(("prefix", &prefix))
+    .bind(("uid", &user_id))
+    .bind(("now", &now))
+    .await
+    .map_err(|e| crate::error::ApiError::DatabaseError(e.to_string()))?;
+
+    // Update registration: approved, store raw key for one-time delivery
+    db.query(
+        "UPDATE agent_registration SET
+            status            = 'approved',
+            created_user_id   = $uid,
+            pending_api_key   = $key,
+            api_key_delivered = false,
+            reviewed_by       = $reviewer,
+            reviewed_at       = $now,
+            updated_at        = $now
+         WHERE reg_id = $id",
+    )
+    .bind(("id", &reg_id))
+    .bind(("uid", &user_id))
+    .bind(("key", &raw_key))
+    .bind(("reviewer", &user.id))
+    .bind(("now", &now))
+    .await
+    .map_err(|e| crate::error::ApiError::DatabaseError(e.to_string()))?;
+
+    Ok(Json(json!({
+        "success": true,
+        "data": {
+            "request_id": reg_id,
+            "status":     "approved",
+            "api_key":    raw_key,
+            "user_id":    user_id,
+            "message":    "审批通过，用户账号和 API 密钥已创建"
+        }
+    })))
+}
+
+#[derive(Deserialize)]
+struct RejectRequest {
+    reason: Option<String>,
+}
+
+async fn reject_agent_request(
+    Extension(app_state): Extension<Arc<AppState>>,
+    Path(reg_id): Path<String>,
+    user: User,
+    Json(body): Json<RejectRequest>,
+) -> Result<Json<Value>> {
+    require_admin(&user)?;
+
+    let db = &app_state.db.client;
+    let now = chrono::Utc::now().to_rfc3339();
+    let reason = body.reason.as_deref().unwrap_or("").to_string();
+
+    db.query(
+        "UPDATE agent_registration SET
+            status        = 'rejected',
+            reject_reason = $reason,
+            reviewed_by   = $reviewer,
+            reviewed_at   = $now,
+            updated_at    = $now
+         WHERE reg_id = $id AND status = 'pending'",
+    )
+    .bind(("id", &reg_id))
+    .bind(("reason", &reason))
+    .bind(("reviewer", &user.id))
+    .bind(("now", &now))
+    .await
+    .map_err(|e| crate::error::ApiError::DatabaseError(e.to_string()))?;
+
+    Ok(Json(json!({ "success": true, "message": "申请已拒绝" })))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 fn sha256_hex(input: &str) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut h = DefaultHasher::new();
-    input.hash(&mut h);
-    format!("{:016x}{:016x}", h.finish(), h.finish())
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(input.as_bytes());
+    format!("{:x}", digest)
 }

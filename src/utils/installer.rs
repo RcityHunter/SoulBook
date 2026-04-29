@@ -175,21 +175,24 @@ pub mod wizard {
             let db_file = format!("{}/rainbow.db", data_dir);
 
             // 构建启动命令
+            let bind_addr = config.database_url
+                .trim_start_matches("http://")
+                .trim_start_matches("https://")
+                .to_string();
+
             let mut cmd = Command::new("surreal");
             cmd.arg("start")
-                .arg("--auth")
-                .arg("--user")
+                .arg("--username")
                 .arg(&config.database_username)
-                .arg("--pass")
+                .arg("--password")
                 .arg(&config.database_password)
                 .arg("--bind")
-                .arg(&config.database_url)
-                .arg(format!("file://{}", db_file));
+                .arg(&bind_addr)
+                .arg(format!("file:{}", db_file));
 
-            // 在后台启动数据库
             println!(
-                "执行命令: surreal start --auth --user {} --pass *** --bind {} file://{}",
-                config.database_username, config.database_url, db_file
+                "执行命令: surreal start --username {} --password *** --bind {} file://{}",
+                config.database_username, bind_addr, db_file
             );
 
             let child = cmd.spawn().map_err(|e| {

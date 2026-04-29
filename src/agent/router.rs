@@ -1,12 +1,12 @@
-use std::sync::Arc;
+﻿use std::sync::Arc;
 
 use axum::{
-    Extension, Router,
+    Extension, Json, Router,
     extract::{Path, Query},
     http::StatusCode,
     middleware::from_fn,
     response::Response,
-    routing::get,
+    routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -143,6 +143,9 @@ pub fn router() -> Router {
         .route("/spaces/:space_id/documents", get(list_documents))
         .route("/documents/:document_id", get(get_document))
         .route("/search/documents", get(search_documents))
+        // Agent self-registration (public, no auth required)
+        .route("/register", post(agent_register))
+        .route("/register/:request_id", get(check_register_status))
         .layer(from_fn(inject_request_id))
 }
 
@@ -451,6 +454,183 @@ async fn search_documents(
         ),
     }
 }
+
+// ── Agent self-registration ───────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct AgentRegisterRequest {
+    agent_name: String,
+    agent_type: Option<String>,
+    contact_email: String,
+    description: Option<String>,
+}
+
+async fn agent_register(
+    Extension(app_state): Extension<Arc<AppState>>,
+    request_id_ext: Option<Extension<RequestId>>,
+    Json(body): Json<AgentRegisterRequest>,
+) -> Response {
+    let rid = request_id_ext.map(|Extension(r)| r);
+
+    if body.agent_name.trim().is_empty() || body.contact_email.trim().is_empty() {
+        return err_response::<Value>(
+            StatusCode::BAD_REQUEST,
+            rid,
+            "invalid_request",
+            "agent_name 和 contact_email 为必填项",
+        );
+    }
+
+    let db = &app_state.db.client;
+    let now = chrono::Utc::now().to_rfc3339();
+    let reg_id = uuid::Uuid::new_v4().to_string().replace('-', "");
+
+    match db
+        .query(
+            "CREATE agent_registration SET
+                reg_id          = $reg_id,
+                agent_name      = $agent_name,
+                agent_type      = $agent_type,
+                contact_email   = $contact_email,
+                description     = $description,
+                status          = 'pending',
+                created_user_id = '',
+                pending_api_key = '',
+                api_key_delivered = false,
+                reviewed_by     = '',
+                reviewed_at     = '',
+                reject_reason   = '',
+                created_at      = $now,
+                updated_at      = $now",
+        )
+        .bind(("reg_id", &reg_id))
+        .bind(("agent_name", body.agent_name.trim()))
+        .bind(("agent_type", body.agent_type.as_deref().unwrap_or("custom")))
+        .bind(("contact_email", body.contact_email.trim()))
+        .bind(("description", body.description.as_deref().unwrap_or("")))
+        .bind(("now", &now))
+        .await
+    {
+        Ok(_) => ok_response(
+            StatusCode::OK,
+            rid,
+            serde_json::json!({
+                "capability": "agent.register",
+                "data": {
+                    "request_id": reg_id,
+                    "status": "pending",
+                    "message": "申请已提交，请等待管理员审核。\
+                                使用 request_id 轮询 GET /agent/v1/register/{request_id} 获取状态。"
+                }
+            }),
+        ),
+        Err(e) => err_response::<Value>(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            rid,
+            "db_error",
+            e.to_string(),
+        ),
+    }
+}
+
+async fn check_register_status(
+    Extension(app_state): Extension<Arc<AppState>>,
+    Path(reg_id): Path<String>,
+    request_id_ext: Option<Extension<RequestId>>,
+) -> Response {
+    let rid = request_id_ext.map(|Extension(r)| r);
+    let db = &app_state.db.client;
+
+    let mut result = match db
+        .query(
+            "SELECT reg_id, agent_name, status, api_key_delivered,
+                    pending_api_key, reject_reason, created_at, reviewed_at
+             FROM agent_registration WHERE reg_id = $reg_id LIMIT 1",
+        )
+        .bind(("reg_id", &reg_id))
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return err_response::<Value>(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                rid,
+                "db_error",
+                e.to_string(),
+            )
+        }
+    };
+
+    let items: Vec<Value> = result.take(0).unwrap_or_default();
+    let record = match items.into_iter().next() {
+        Some(r) => r,
+        None => {
+            return err_response::<Value>(
+                StatusCode::NOT_FOUND,
+                rid,
+                "not_found",
+                "找不到该注册申请",
+            )
+        }
+    };
+
+    let status = record
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("pending");
+    let delivered = record
+        .get("api_key_delivered")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let pending_key = record
+        .get("pending_api_key")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    // Deliver key exactly once: mark as delivered immediately to prevent race
+    let api_key = if status == "approved" && !delivered && !pending_key.is_empty() {
+        let now = chrono::Utc::now().to_rfc3339();
+        let _ = db
+            .query(
+                "UPDATE agent_registration
+                 SET api_key_delivered = true, pending_api_key = '', updated_at = $now
+                 WHERE reg_id = $reg_id",
+            )
+            .bind(("reg_id", &reg_id))
+            .bind(("now", &now))
+            .await;
+        Some(pending_key)
+    } else {
+        None
+    };
+
+    let message = match status {
+        "approved" => "审核已通过",
+        "rejected" => "申请已被拒绝",
+        _ => "等待管理员审核中",
+    };
+
+    ok_response(
+        StatusCode::OK,
+        rid,
+        serde_json::json!({
+            "capability": "agent.register.status",
+            "data": {
+                "request_id": reg_id,
+                "agent_name":  record.get("agent_name").and_then(|v| v.as_str()).unwrap_or(""),
+                "status":      status,
+                "api_key":     api_key,
+                "reject_reason": record.get("reject_reason").and_then(|v| v.as_str()).unwrap_or(""),
+                "created_at":  record.get("created_at").and_then(|v| v.as_str()).unwrap_or(""),
+                "reviewed_at": record.get("reviewed_at").and_then(|v| v.as_str()).unwrap_or(""),
+                "message":     message
+            }
+        }),
+    )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 fn agent_ok<T>(capability: &'static str, scope: AgentScope, data: T) -> AgentSuccessEnvelope<T>
 where
