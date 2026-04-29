@@ -1,14 +1,15 @@
 use axum::{
-    Extension, Router,
     extract::{Path, Query},
     response::Json,
     routing::{get, post, put},
+    Extension, Router,
 };
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::sync::Arc;
+use tracing::warn;
 
-use crate::{AppState, error::Result, services::auth::User};
+use crate::{error::Result, services::auth::User, AppState};
 
 pub fn router() -> Router {
     Router::new()
@@ -38,32 +39,26 @@ async fn get_seo_metadata(
     _user: User,
 ) -> Result<Json<Value>> {
     let db = &app_state.db.client;
-    let mut result = db
+    let meta = match db
         .query("SELECT * FROM seo_metadata WHERE space_slug = $slug LIMIT 1")
         .bind(("slug", &space_slug))
         .await
-        .map_err(|e| crate::error::ApiError::DatabaseError(e.to_string()))?;
-    let items: Vec<Value> = result
-        .take(0)
-        .map_err(|e| crate::error::ApiError::DatabaseError(e.to_string()))?;
-
-    let meta = items.into_iter().next().unwrap_or_else(|| {
-        json!({
-            "space_slug": space_slug,
-            "seo_title": format!("{} — 知识文档", space_slug),
-            "seo_description": "",
-            "keywords": "",
-            "url_slug": space_slug,
-            "og_image": "",
-            "score": {
-                "title": "待检查",
-                "description": "待检查",
-                "keywords": "待检查",
-                "images_alt": "待检查",
-                "hreflang": "待检查"
+    {
+        Ok(mut result) => match result.take::<Vec<Value>>(0) {
+            Ok(items) => items
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| default_seo_metadata(&space_slug)),
+            Err(e) => {
+                warn!("failed to parse seo metadata for {}: {}", space_slug, e);
+                default_seo_metadata(&space_slug)
             }
-        })
-    });
+        },
+        Err(e) => {
+            warn!("failed to query seo metadata for {}: {}", space_slug, e);
+            default_seo_metadata(&space_slug)
+        }
+    };
 
     Ok(Json(json!({ "success": true, "data": meta })))
 }
@@ -205,13 +200,22 @@ async fn list_publish_targets(
     _user: User,
 ) -> Result<Json<Value>> {
     let db = &app_state.db.client;
-    let mut result = db
+    let mut items = match db
         .query("SELECT * FROM publish_target WHERE is_deleted = false ORDER BY created_at ASC")
         .await
-        .map_err(|e| crate::error::ApiError::DatabaseError(e.to_string()))?;
-    let mut items: Vec<Value> = result
-        .take(0)
-        .map_err(|e| crate::error::ApiError::DatabaseError(e.to_string()))?;
+    {
+        Ok(mut result) => match result.take::<Vec<Value>>(0) {
+            Ok(items) => items,
+            Err(e) => {
+                warn!("failed to parse publish targets: {}", e);
+                Vec::new()
+            }
+        },
+        Err(e) => {
+            warn!("failed to query publish targets: {}", e);
+            Vec::new()
+        }
+    };
 
     if items.is_empty() {
         items = default_targets();
@@ -340,14 +344,23 @@ async fn list_release_history(
     let db = &app_state.db.client;
     let page = q.page.unwrap_or(1).max(1);
     let offset = (page - 1) * 20;
-    let mut result = db
+    let mut items = match db
         .query("SELECT * FROM release_history ORDER BY published_at DESC LIMIT 20 START $offset")
         .bind(("offset", offset))
         .await
-        .map_err(|e| crate::error::ApiError::DatabaseError(e.to_string()))?;
-    let mut items: Vec<Value> = result
-        .take(0)
-        .map_err(|e| crate::error::ApiError::DatabaseError(e.to_string()))?;
+    {
+        Ok(mut result) => match result.take::<Vec<Value>>(0) {
+            Ok(items) => items,
+            Err(e) => {
+                warn!("failed to parse release history: {}", e);
+                Vec::new()
+            }
+        },
+        Err(e) => {
+            warn!("failed to query release history: {}", e);
+            Vec::new()
+        }
+    };
 
     if items.is_empty() {
         items = default_history();
@@ -356,6 +369,24 @@ async fn list_release_history(
     Ok(Json(
         json!({ "success": true, "data": { "items": items, "page": page } }),
     ))
+}
+
+fn default_seo_metadata(space_slug: &str) -> Value {
+    json!({
+        "space_slug": space_slug,
+        "seo_title": format!("{} - 知识文档", space_slug),
+        "seo_description": "",
+        "keywords": "",
+        "url_slug": space_slug,
+        "og_image": "",
+        "score": {
+            "title": "待检查",
+            "description": "待检查",
+            "keywords": "待检查",
+            "images_alt": "待检查",
+            "hreflang": "待检查"
+        }
+    })
 }
 
 fn default_targets() -> Vec<Value> {
@@ -397,4 +428,34 @@ fn default_history() -> Vec<Value> {
         json!({ "version": "v2.3.0", "target": "生产环境", "status": "成功", "triggered_by": "Admin", "published_at": "2024-01-14T10:00:00Z" }),
         json!({ "version": "v2.2.1", "target": "静态导出", "status": "成功", "triggered_by": "Admin", "published_at": "2024-01-07T11:00:00Z" }),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_publish_targets_match_frontend_contract() {
+        let items = default_targets();
+        assert!(!items.is_empty());
+        assert_eq!(items[0]["id"], "publish_target:prod");
+        assert!(items[0].get("name").is_some());
+        assert!(items[0].get("status").is_some());
+    }
+
+    #[test]
+    fn default_release_history_matches_frontend_contract() {
+        let items = default_history();
+        assert!(!items.is_empty());
+        assert!(items[0].get("version").is_some());
+        assert!(items[0].get("published_at").is_some());
+    }
+
+    #[test]
+    fn default_seo_metadata_matches_frontend_contract() {
+        let meta = default_seo_metadata("test");
+        assert_eq!(meta["space_slug"], "test");
+        assert_eq!(meta["url_slug"], "test");
+        assert!(meta.get("score").is_some());
+    }
 }
