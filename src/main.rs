@@ -293,11 +293,13 @@ async fn sso_bridge(
       const token = {token_js};
       const next = {next_js};
       try {{
-        localStorage.setItem('jwt_token', token);
-        localStorage.setItem('auth_token', token);
-        localStorage.setItem('token', token);
-        localStorage.setItem('souldoc_token', token);
-        localStorage.setItem('soulbook_token', token);
+        const storedToken = JSON.stringify(token);
+        localStorage.setItem('jwt_token', storedToken);
+        localStorage.setItem('auth_token', storedToken);
+        localStorage.setItem('token', storedToken);
+        localStorage.setItem('souldoc_token', storedToken);
+        localStorage.setItem('soulbook_token', storedToken);
+        localStorage.setItem('soulbook_token_raw', token);
       }} catch (e) {{
         // ignore storage errors
       }}
