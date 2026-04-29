@@ -183,6 +183,7 @@ async fn main() -> anyhow::Result<()> {
         .nest("/api/auth", auth_router)
         .nest("/api/docs/agent", agent::router::router())
         .nest("/api/docs/auth", routes::auth::router())
+        .nest("/api/docs/auth/google", routes::google_oauth::router())
         .nest("/api/docs/spaces", routes::spaces::router())
         .nest("/api/docs/spaces", routes::space_members::router())
         .nest("/api/docs/files", routes::files::router())

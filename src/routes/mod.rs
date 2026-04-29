@@ -8,6 +8,7 @@ pub mod developer;
 pub mod documents;
 pub mod files;
 pub mod git_sync;
+pub mod google_oauth;
 pub mod language;
 pub mod local_auth;
 pub mod notifications;

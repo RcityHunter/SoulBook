@@ -7,6 +7,19 @@ pub struct Config {
     pub auth: AuthConfig,
     pub server: ServerConfig,
     pub features: FeatureConfig,
+    pub oauth: OAuthConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct OAuthConfig {
+    pub google: Option<GoogleOAuthConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoogleOAuthConfig {
+    pub client_id: String,
+    pub client_secret: String,
+    pub redirect_uri: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,11 +116,33 @@ impl Config {
                 .unwrap_or(true),
         };
 
+        let oauth = OAuthConfig {
+            google: match (
+                env::var("GOOGLE_CLIENT_ID"),
+                env::var("GOOGLE_CLIENT_SECRET"),
+                env::var("GOOGLE_REDIRECT_URI"),
+            ) {
+                (Ok(client_id), Ok(client_secret), Ok(redirect_uri))
+                    if !client_id.is_empty()
+                        && !client_secret.is_empty()
+                        && !redirect_uri.is_empty() =>
+                {
+                    Some(GoogleOAuthConfig {
+                        client_id,
+                        client_secret,
+                        redirect_uri,
+                    })
+                }
+                _ => None,
+            },
+        };
+
         Ok(Config {
             database,
             auth,
             server,
             features,
+            oauth,
         })
     }
 }
