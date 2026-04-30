@@ -278,7 +278,7 @@ async fn sso_bridge(
     }
     let next = params
         .next
-        .filter(|value| !value.trim().is_empty())
+        .map(|value| sanitize_sso_next(Some(value), &state.config.server.app_url))
         .unwrap_or_else(|| state.config.server.app_url.clone());
     let token_js = serde_json::to_string(&token).unwrap_or_else(|_| "\"\"".into());
     let next_js = serde_json::to_string(&next).unwrap_or_else(|_| "\"/\"".into());
@@ -310,6 +310,23 @@ async fn sso_bridge(
 </html>"#
     );
     Html(html)
+}
+
+fn sanitize_sso_next(next: Option<String>, default: &str) -> String {
+    let Some(next) = next else {
+        return default.to_string();
+    };
+    let next = next.trim();
+    if next.is_empty()
+        || !next.starts_with('/')
+        || next.starts_with("//")
+        || next.contains('\\')
+        || next.chars().any(char::is_control)
+    {
+        return default.to_string();
+    }
+
+    next.to_string()
 }
 
 // 自动启动数据库的函数
@@ -426,4 +443,38 @@ async fn start_installer_only_mode(config: Config) -> anyhow::Result<()> {
         .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sso_safe_relative_next_is_accepted() {
+        assert_eq!(
+            sanitize_sso_next(
+                Some("/docs/space?tab=read#top".to_string()),
+                "https://book.test"
+            ),
+            "/docs/space?tab=read#top"
+        );
+    }
+
+    #[test]
+    fn sso_unsafe_next_values_fall_back_to_app_default() {
+        for next in [
+            "javascript:alert(1)",
+            "http://evil.test",
+            "https://evil.test",
+            "//evil.test/path",
+            "/docs\n<script>",
+            "",
+            "   ",
+        ] {
+            assert_eq!(
+                sanitize_sso_next(Some(next.to_string()), "https://book.test"),
+                "https://book.test"
+            );
+        }
+    }
 }

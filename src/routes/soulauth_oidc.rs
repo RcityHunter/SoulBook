@@ -42,8 +42,14 @@ struct StartParams {
 struct OidcState {
     nonce: String,
     next: Option<String>,
-    code_verifier: String,
     csrf: String,
+    exp: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LoginCookie {
+    csrf: String,
+    code_verifier: String,
     exp: i64,
 }
 
@@ -88,16 +94,21 @@ async fn start(
     let state_claims = OidcState {
         nonce: nonce.clone(),
         next: Some(sanitize_next(params.next, &app_state.config.server.app_url)),
-        code_verifier,
         csrf: csrf.clone(),
         exp: (Utc::now() + Duration::minutes(10)).timestamp(),
     };
+    let login_cookie = LoginCookie {
+        csrf,
+        code_verifier,
+        exp: (Utc::now() + Duration::minutes(10)).timestamp(),
+    };
     let state = encode_state(&state_claims, &app_state.config.auth.jwt_secret)?;
+    let cookie_token = encode_login_cookie(&login_cookie, &app_state.config.auth.jwt_secret)?;
     let url = build_authorize_url(oauth, &state, &nonce, &code_challenge);
     let mut response = Redirect::to(&url).into_response();
     response.headers_mut().append(
         SET_COOKIE,
-        state_cookie(&csrf)
+        state_cookie(&cookie_token)
             .parse()
             .map_err(|e| AppError::Internal(anyhow::anyhow!("state cookie failed: {}", e)))?,
     );
@@ -110,9 +121,17 @@ async fn callback(
     headers: HeaderMap,
     Query(params): Query<CallbackParams>,
 ) -> Result<Response> {
-    if let Some(err) = params.error {
-        let login_url = format!("/docs/login?error={}", urlencoding::encode(&err));
-        return redirect_with_clear_cookie(&login_url);
+    if params.error.is_some() {
+        let login_url = format!("/docs/login?error={}", safe_login_error());
+        if let Some(state_token) = params.state.as_deref() {
+            validate_error_callback_state(
+                Some(state_token),
+                &headers,
+                &app_state.config.auth.jwt_secret,
+            )?;
+            return redirect_with_clear_cookie(&login_url);
+        }
+        return Ok(Redirect::to(&login_url).into_response());
     }
 
     let code = params
@@ -122,8 +141,8 @@ async fn callback(
         .state
         .ok_or_else(|| AppError::BadRequest("missing state".into()))?;
     let state_claims = decode_state(&state_token, &app_state.config.auth.jwt_secret)?;
-    let cookie_csrf = state_cookie_from_headers(&headers);
-    validate_state_cookie(cookie_csrf.as_deref(), &state_claims)?;
+    let login_cookie = login_cookie_from_headers(&headers, &app_state.config.auth.jwt_secret)?;
+    let login_cookie = validate_login_cookie(login_cookie, &state_claims)?;
 
     let oauth = app_state
         .config
@@ -142,7 +161,7 @@ async fn callback(
             ("redirect_uri", oauth.redirect_uri.as_str()),
             ("client_id", oauth.client_id.as_str()),
             ("client_secret", oauth.client_secret.as_str()),
-            ("code_verifier", state_claims.code_verifier.as_str()),
+            ("code_verifier", login_cookie.code_verifier.as_str()),
         ])
         .send()
         .await
@@ -335,6 +354,26 @@ fn decode_state(token: &str, secret: &str) -> Result<OidcState> {
     .map_err(|_| AppError::BadRequest("invalid or expired state".into()))
 }
 
+fn encode_login_cookie(cookie: &LoginCookie, secret: &str) -> Result<String> {
+    encode(
+        &Header::default(),
+        cookie,
+        &EncodingKey::from_secret(secret.as_ref()),
+    )
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("login cookie encode failed: {}", e)))
+}
+
+fn decode_login_cookie(token: &str, secret: &str) -> Result<LoginCookie> {
+    let validation = Validation::new(Algorithm::HS256);
+    decode::<LoginCookie>(
+        token,
+        &DecodingKey::from_secret(secret.as_ref()),
+        &validation,
+    )
+    .map(|data| data.claims)
+    .map_err(|_| AppError::BadRequest("invalid or expired state".into()))
+}
+
 fn sanitize_next(next: Option<String>, default: &str) -> String {
     let Some(next) = next else {
         return default.to_string();
@@ -352,17 +391,35 @@ fn sanitize_next(next: Option<String>, default: &str) -> String {
     next.to_string()
 }
 
-fn validate_state_cookie(cookie_csrf: Option<&str>, state: &OidcState) -> Result<()> {
-    match cookie_csrf {
-        Some(value) if value == state.csrf => Ok(()),
+fn validate_login_cookie(cookie: Option<LoginCookie>, state: &OidcState) -> Result<LoginCookie> {
+    match cookie {
+        Some(cookie) if cookie.csrf == state.csrf => Ok(cookie),
         _ => Err(AppError::BadRequest("invalid or expired state".into())),
     }
 }
 
-fn state_cookie(csrf: &str) -> String {
+fn validate_error_callback_state(
+    state_token: Option<&str>,
+    headers: &HeaderMap,
+    secret: &str,
+) -> Result<()> {
+    if let Some(state_token) = state_token {
+        let state = decode_state(state_token, secret)?;
+        let cookie = login_cookie_from_headers(headers, secret)?;
+        validate_login_cookie(cookie, &state)?;
+    }
+
+    Ok(())
+}
+
+fn safe_login_error() -> &'static str {
+    "login_failed"
+}
+
+fn state_cookie(cookie_token: &str) -> String {
     format!(
         "{}={}; Max-Age=600; Path={}; HttpOnly; Secure; SameSite=Lax",
-        STATE_COOKIE_NAME, csrf, STATE_COOKIE_PATH
+        STATE_COOKIE_NAME, cookie_token, STATE_COOKIE_PATH
     )
 }
 
@@ -384,12 +441,21 @@ fn redirect_with_clear_cookie(url: &str) -> Result<Response> {
     Ok(response)
 }
 
-fn state_cookie_from_headers(headers: &HeaderMap) -> Option<String> {
-    let cookie_header = headers.get(COOKIE)?.to_str().ok()?;
-    cookie_header.split(';').find_map(|cookie| {
+fn login_cookie_from_headers(headers: &HeaderMap, secret: &str) -> Result<Option<LoginCookie>> {
+    let Some(cookie_header) = headers.get(COOKIE) else {
+        return Ok(None);
+    };
+    let Ok(cookie_header) = cookie_header.to_str() else {
+        return Ok(None);
+    };
+    let cookie_token = cookie_header.split(';').find_map(|cookie| {
         let (name, value) = cookie.trim().split_once('=')?;
         (name == STATE_COOKIE_NAME).then(|| value.to_string())
-    })
+    });
+
+    cookie_token
+        .map(|token| decode_login_cookie(&token, secret))
+        .transpose()
 }
 
 fn build_authorize_url(
@@ -483,22 +549,37 @@ mod tests {
     }
 
     #[test]
-    fn state_round_trip_preserves_nonce_next_and_code_verifier() {
+    fn state_round_trip_preserves_only_non_secret_fields() {
         let state = OidcState {
             nonce: "nonce-value".to_string(),
             next: Some("/docs".to_string()),
-            code_verifier: "verifier-value".to_string(),
             csrf: "csrf-value".to_string(),
             exp: (Utc::now() + Duration::minutes(10)).timestamp(),
         };
 
         let token = encode_state(&state, "test-secret").expect("state should encode");
         let decoded = decode_state(&token, "test-secret").expect("state should decode");
+        let decoded_json = serde_json::to_value(&decoded).expect("state should serialize");
 
         assert_eq!(decoded.nonce, "nonce-value");
         assert_eq!(decoded.next.as_deref(), Some("/docs"));
-        assert_eq!(decoded.code_verifier, "verifier-value");
         assert_eq!(decoded.csrf, "csrf-value");
+        assert!(decoded_json.get("code_verifier").is_none());
+    }
+
+    #[test]
+    fn signed_login_cookie_preserves_verifier_and_csrf() {
+        let cookie = LoginCookie {
+            csrf: "csrf-value".to_string(),
+            code_verifier: "verifier-value".to_string(),
+            exp: (Utc::now() + Duration::minutes(10)).timestamp(),
+        };
+
+        let token = encode_login_cookie(&cookie, "test-secret").expect("cookie should encode");
+        let decoded = decode_login_cookie(&token, "test-secret").expect("cookie should decode");
+
+        assert_eq!(decoded.csrf, "csrf-value");
+        assert_eq!(decoded.code_verifier, "verifier-value");
     }
 
     #[test]
@@ -529,14 +610,37 @@ mod tests {
         let state = OidcState {
             nonce: "nonce-value".to_string(),
             next: None,
-            code_verifier: "verifier-value".to_string(),
             csrf: "csrf-value".to_string(),
             exp: (Utc::now() + Duration::minutes(10)).timestamp(),
         };
+        let cookie = LoginCookie {
+            csrf: "csrf-value".to_string(),
+            code_verifier: "verifier-value".to_string(),
+            exp: (Utc::now() + Duration::minutes(10)).timestamp(),
+        };
 
-        assert!(validate_state_cookie(Some("csrf-value"), &state).is_ok());
-        assert!(validate_state_cookie(None, &state).is_err());
-        assert!(validate_state_cookie(Some("other-value"), &state).is_err());
+        assert!(validate_login_cookie(Some(cookie), &state).is_ok());
+        assert!(validate_login_cookie(None, &state).is_err());
+        assert!(validate_login_cookie(
+            Some(LoginCookie {
+                csrf: "other-value".to_string(),
+                code_verifier: "verifier-value".to_string(),
+                exp: (Utc::now() + Duration::minutes(10)).timestamp(),
+            }),
+            &state
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn error_callback_without_valid_state_does_not_clear_cookie() {
+        let headers = HeaderMap::new();
+
+        assert!(validate_error_callback_state(None, &headers, "test-secret").is_ok());
+        assert!(
+            validate_error_callback_state(Some("invalid-state"), &headers, "test-secret").is_err()
+        );
+        assert_eq!(safe_login_error(), "login_failed");
     }
 
     #[test]
