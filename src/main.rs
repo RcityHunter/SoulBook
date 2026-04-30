@@ -399,16 +399,73 @@ pub(crate) fn sanitize_sso_next(next: Option<String>, default: &str) -> String {
         return default.to_string();
     };
     let next = next.trim();
+    let Some(normalized_next) = normalize_sso_next(next) else {
+        return default.to_string();
+    };
+
+    if is_sso_bridge_path(&normalized_next) {
+        return default.to_string();
+    }
+
+    normalized_next
+}
+
+fn normalize_sso_next(next: &str) -> Option<String> {
     if next.is_empty()
         || !next.starts_with('/')
         || next.starts_with("//")
         || next.contains('\\')
         || next.chars().any(char::is_control)
     {
-        return default.to_string();
+        return None;
     }
 
-    next.to_string()
+    let mut normalized = next.to_string();
+    for _ in 0..3 {
+        let decoded = urlencoding::decode(&normalized).ok()?.into_owned();
+        if decoded == normalized {
+            break;
+        }
+        normalized = decoded;
+    }
+
+    if normalized.is_empty()
+        || !normalized.starts_with('/')
+        || normalized.starts_with("//")
+        || normalized.contains('\\')
+        || normalized.chars().any(char::is_control)
+    {
+        return None;
+    }
+
+    Some(normalized)
+}
+
+fn is_sso_bridge_path(next: &str) -> bool {
+    let path_end = next.find(['?', '#']).unwrap_or(next.len());
+    let path = &next[..path_end];
+    let normalized_path = normalize_path_segments(path);
+    normalized_path.eq_ignore_ascii_case("/sso")
+        || normalized_path.to_ascii_lowercase().starts_with("/sso/")
+}
+
+fn normalize_path_segments(path: &str) -> String {
+    let mut segments = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            _ => segments.push(segment),
+        }
+    }
+
+    if segments.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", segments.join("/"))
+    }
 }
 
 // 自动启动数据库的函数
@@ -540,6 +597,10 @@ mod tests {
             ),
             "/docs/space?tab=read#top"
         );
+        assert_eq!(
+            sanitize_sso_next(Some("/search?q=a".to_string()), "https://book.test"),
+            "/search?q=a"
+        );
     }
 
     #[test]
@@ -552,6 +613,29 @@ mod tests {
             "/docs\n<script>",
             "",
             "   ",
+        ] {
+            assert_eq!(
+                sanitize_sso_next(Some(next.to_string()), "https://book.test"),
+                "https://book.test"
+            );
+        }
+    }
+
+    #[test]
+    fn sso_nested_sso_next_values_fall_back_to_app_default() {
+        for next in [
+            "/sso",
+            "/sso?bridge=attacker",
+            "/sso#fragment",
+            "/sso/",
+            "/%73so?bridge=attacker",
+            "/s%73o?bridge=attacker",
+            "/sso%3Fbridge%3Dattacker",
+            "/docs/../sso?bridge=attacker",
+            "/./sso?bridge=attacker",
+            "/%2e/sso?bridge=attacker",
+            "/docs/%2e%2e/sso?bridge=attacker",
+            "/docs/%2E%2E/%73so?bridge=attacker",
         ] {
             assert_eq!(
                 sanitize_sso_next(Some(next.to_string()), "https://book.test"),
@@ -580,6 +664,28 @@ mod tests {
 
         assert_eq!(payload.token, "jwt-value");
         assert_eq!(payload.next, "/docs/space");
+    }
+
+    #[test]
+    fn sso_bridge_nested_sso_next_falls_back_to_app_default() {
+        let bridge = create_sso_bridge_token(
+            "jwt-value",
+            Some("/sso?bridge=attacker".to_string()),
+            "https://book.test",
+            "test-secret",
+        )
+        .expect("bridge should encode");
+
+        let payload = resolve_sso_bridge_payload(
+            Some(bridge),
+            None,
+            "https://book.test",
+            "test-secret",
+        )
+        .expect("bridge should decode");
+
+        assert_eq!(payload.token, "jwt-value");
+        assert_eq!(payload.next, "https://book.test");
     }
 
     #[test]

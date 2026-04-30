@@ -378,20 +378,7 @@ fn decode_login_cookie(token: &str, secret: &str) -> Result<LoginCookie> {
 }
 
 fn sanitize_next(next: Option<String>, default: &str) -> String {
-    let Some(next) = next else {
-        return default.to_string();
-    };
-    let next = next.trim();
-    if next.is_empty()
-        || !next.starts_with('/')
-        || next.starts_with("//")
-        || next.contains('\\')
-        || next.chars().any(char::is_control)
-    {
-        return default.to_string();
-    }
-
-    next.to_string()
+    crate::sanitize_sso_next(next, default)
 }
 
 fn validate_login_cookie(cookie: Option<LoginCookie>, state: &OidcState) -> Result<LoginCookie> {
@@ -591,6 +578,7 @@ mod tests {
             sanitize_next(Some("/docs/login?tab=oidc#top".to_string()), "/"),
             "/docs/login?tab=oidc#top"
         );
+        assert_eq!(sanitize_next(Some("/search?q=a".to_string()), "/"), "/search?q=a");
     }
 
     #[test]
@@ -605,6 +593,26 @@ mod tests {
             "   ",
         ] {
             assert_eq!(sanitize_next(Some(next.to_string()), "/"), "/");
+        }
+    }
+
+    #[test]
+    fn nested_sso_next_values_fall_back_to_default() {
+        for next in [
+            "/sso",
+            "/sso?bridge=attacker",
+            "/sso#fragment",
+            "/sso/",
+            "/%73so?bridge=attacker",
+            "/s%73o?bridge=attacker",
+            "/sso%3Fbridge%3Dattacker",
+            "/docs/../sso?bridge=attacker",
+            "/./sso?bridge=attacker",
+            "/%2e/sso?bridge=attacker",
+            "/docs/%2e%2e/sso?bridge=attacker",
+            "/docs/%2E%2E/%73so?bridge=attacker",
+        ] {
+            assert_eq!(sanitize_next(Some(next.to_string()), "/docs"), "/docs");
         }
     }
 
