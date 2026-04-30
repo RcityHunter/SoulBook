@@ -541,6 +541,8 @@ DEFINE FIELD username ON local_user TYPE option<string>;
 DEFINE FIELD password_hash ON local_user TYPE string;
 DEFINE FIELD avatar_url ON local_user TYPE option<string>;
 DEFINE FIELD provider ON local_user TYPE option<string>;
+DEFINE FIELD external_subject ON local_user TYPE option<string>;
 DEFINE FIELD created_at ON local_user TYPE datetime DEFAULT time::now();
 DEFINE FIELD updated_at ON local_user TYPE datetime DEFAULT time::now();
 DEFINE INDEX local_user_email_unique ON local_user COLUMNS email UNIQUE;
+DEFINE INDEX local_user_provider_subject_idx ON local_user COLUMNS provider, external_subject;
