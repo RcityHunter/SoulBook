@@ -14,7 +14,10 @@ use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 use uuid::Uuid;
 
 use crate::{
@@ -26,6 +29,10 @@ use crate::{
 
 const STATE_COOKIE_NAME: &str = "soulbook_soulauth_oidc_csrf";
 const STATE_COOKIE_PATH: &str = "/api/docs/auth/soulauth";
+
+lazy_static::lazy_static! {
+    static ref OIDC_LOGIN_STORE: Mutex<HashMap<String, LoginCookie>> = Mutex::new(HashMap::new());
+}
 
 pub fn router() -> Router {
     Router::new()
@@ -104,6 +111,7 @@ async fn start(
     };
     let state = encode_state(&state_claims, &app_state.config.auth.jwt_secret)?;
     let cookie_token = encode_login_cookie(&login_cookie, &app_state.config.auth.jwt_secret)?;
+    store_login_cookie(login_cookie)?;
     let url = build_authorize_url(oauth, &state, &nonce, &code_challenge);
     let mut response = Redirect::to(&url).into_response();
     response.headers_mut().append(
@@ -153,12 +161,11 @@ async fn callback(
         next = state_claims.next.as_deref().unwrap_or(""),
         "SoulAuth OIDC state decoded"
     );
-    let login_cookie = login_cookie_from_headers(&headers, &app_state.config.auth.jwt_secret)?;
+    let login_cookie =
+        resolve_login_cookie(&headers, &app_state.config.auth.jwt_secret, &state_claims)?;
     tracing::info!(
-        has_login_cookie = login_cookie.is_some(),
-        "SoulAuth OIDC login cookie decoded"
+        "SoulAuth OIDC login state resolved"
     );
-    let login_cookie = validate_login_cookie(login_cookie, &state_claims)?;
 
     let oauth = app_state
         .config
@@ -432,6 +439,48 @@ fn validate_login_cookie(cookie: Option<LoginCookie>, state: &OidcState) -> Resu
     }
 }
 
+fn store_login_cookie(cookie: LoginCookie) -> Result<()> {
+    cleanup_expired_login_cookies(Utc::now().timestamp());
+    OIDC_LOGIN_STORE
+        .lock()
+        .map_err(|_| AppError::Internal(anyhow::anyhow!("OIDC login store poisoned")))?
+        .insert(cookie.csrf.clone(), cookie);
+    Ok(())
+}
+
+fn resolve_login_cookie(headers: &HeaderMap, secret: &str, state: &OidcState) -> Result<LoginCookie> {
+    if let Some(cookie) = take_stored_login_cookie(state)? {
+        return Ok(cookie);
+    }
+
+    let cookie = login_cookie_from_headers(headers, secret)?;
+    validate_login_cookie(cookie, state)
+}
+
+fn take_stored_login_cookie(state: &OidcState) -> Result<Option<LoginCookie>> {
+    let now = Utc::now().timestamp();
+    let mut store = OIDC_LOGIN_STORE
+        .lock()
+        .map_err(|_| AppError::Internal(anyhow::anyhow!("OIDC login store poisoned")))?;
+
+    store.retain(|_, cookie| cookie.exp > now);
+    let Some(cookie) = store.remove(&state.csrf) else {
+        return Ok(None);
+    };
+
+    if cookie.csrf == state.csrf {
+        Ok(Some(cookie))
+    } else {
+        Ok(None)
+    }
+}
+
+fn cleanup_expired_login_cookies(now: i64) {
+    if let Ok(mut store) = OIDC_LOGIN_STORE.lock() {
+        store.retain(|_, cookie| cookie.exp > now);
+    }
+}
+
 fn validate_error_callback_state(
     state_token: Option<&str>,
     headers: &HeaderMap,
@@ -439,8 +488,7 @@ fn validate_error_callback_state(
 ) -> Result<()> {
     if let Some(state_token) = state_token {
         let state = decode_state(state_token, secret)?;
-        let cookie = login_cookie_from_headers(headers, secret)?;
-        validate_login_cookie(cookie, &state)?;
+        let _ = resolve_login_cookie(headers, secret, &state)?;
     }
 
     Ok(())
@@ -688,6 +736,30 @@ mod tests {
             &state
         )
         .is_err());
+    }
+
+    #[test]
+    fn stored_login_state_resolves_without_browser_cookie() {
+        let csrf = Uuid::new_v4().to_string();
+        let state = OidcState {
+            nonce: "nonce-value".to_string(),
+            next: None,
+            csrf: csrf.clone(),
+            exp: (Utc::now() + Duration::minutes(10)).timestamp(),
+        };
+        let cookie = LoginCookie {
+            csrf,
+            code_verifier: "verifier-value".to_string(),
+            exp: (Utc::now() + Duration::minutes(10)).timestamp(),
+        };
+        let headers = HeaderMap::new();
+
+        store_login_cookie(cookie).expect("login state should store");
+        let resolved =
+            resolve_login_cookie(&headers, "test-secret", &state).expect("state should resolve");
+
+        assert_eq!(resolved.code_verifier, "verifier-value");
+        assert!(resolve_login_cookie(&headers, "test-secret", &state).is_err());
     }
 
     #[test]
