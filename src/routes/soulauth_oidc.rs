@@ -1,6 +1,10 @@
 use axum::{
     extract::{Extension, Query},
-    response::Redirect,
+    http::{
+        header::{COOKIE, SET_COOKIE},
+        HeaderMap,
+    },
+    response::{IntoResponse, Redirect, Response},
     routing::get,
     Router,
 };
@@ -20,6 +24,9 @@ use crate::{
     AppState,
 };
 
+const STATE_COOKIE_NAME: &str = "soulbook_soulauth_oidc_csrf";
+const STATE_COOKIE_PATH: &str = "/api/docs/auth/soulauth";
+
 pub fn router() -> Router {
     Router::new()
         .route("/start", get(start))
@@ -36,6 +43,7 @@ struct OidcState {
     nonce: String,
     next: Option<String>,
     code_verifier: String,
+    csrf: String,
     exp: i64,
 }
 
@@ -65,7 +73,7 @@ struct UserInfo {
 async fn start(
     Extension(app_state): Extension<Arc<AppState>>,
     Query(params): Query<StartParams>,
-) -> Result<Redirect> {
+) -> Result<Response> {
     let oauth = app_state
         .config
         .oauth
@@ -74,27 +82,37 @@ async fn start(
         .ok_or_else(|| AppError::BadRequest("SoulAuth OIDC login is not configured".into()))?;
 
     let nonce = Uuid::new_v4().to_string();
+    let csrf = Uuid::new_v4().to_string();
     let code_verifier = generate_code_verifier();
     let code_challenge = pkce_challenge(&code_verifier);
     let state_claims = OidcState {
         nonce: nonce.clone(),
-        next: params.next,
+        next: Some(sanitize_next(params.next, &app_state.config.server.app_url)),
         code_verifier,
+        csrf: csrf.clone(),
         exp: (Utc::now() + Duration::minutes(10)).timestamp(),
     };
     let state = encode_state(&state_claims, &app_state.config.auth.jwt_secret)?;
     let url = build_authorize_url(oauth, &state, &nonce, &code_challenge);
+    let mut response = Redirect::to(&url).into_response();
+    response.headers_mut().append(
+        SET_COOKIE,
+        state_cookie(&csrf)
+            .parse()
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("state cookie failed: {}", e)))?,
+    );
 
-    Ok(Redirect::to(&url))
+    Ok(response)
 }
 
 async fn callback(
     Extension(app_state): Extension<Arc<AppState>>,
+    headers: HeaderMap,
     Query(params): Query<CallbackParams>,
-) -> Result<Redirect> {
+) -> Result<Response> {
     if let Some(err) = params.error {
         let login_url = format!("/docs/login?error={}", urlencoding::encode(&err));
-        return Ok(Redirect::to(&login_url));
+        return redirect_with_clear_cookie(&login_url);
     }
 
     let code = params
@@ -104,6 +122,8 @@ async fn callback(
         .state
         .ok_or_else(|| AppError::BadRequest("missing state".into()))?;
     let state_claims = decode_state(&state_token, &app_state.config.auth.jwt_secret)?;
+    let cookie_csrf = state_cookie_from_headers(&headers);
+    validate_state_cookie(cookie_csrf.as_deref(), &state_claims)?;
 
     let oauth = app_state
         .config
@@ -129,11 +149,7 @@ async fn callback(
         .map_err(|e| AppError::Internal(anyhow::anyhow!("SoulAuth token request failed: {}", e)))?;
 
     if !token_resp.status().is_success() {
-        let body = token_resp.text().await.unwrap_or_default();
-        return Err(AppError::BadRequest(format!(
-            "SoulAuth token exchange failed: {}",
-            body
-        )));
+        return Err(AppError::BadRequest("SoulAuth login failed".into()));
     }
 
     let token_json: TokenResponse = token_resp
@@ -158,11 +174,7 @@ async fn callback(
         })?;
 
     if !userinfo_resp.status().is_success() {
-        let body = userinfo_resp.text().await.unwrap_or_default();
-        return Err(AppError::BadRequest(format!(
-            "SoulAuth userinfo failed: {}",
-            body
-        )));
+        return Err(AppError::BadRequest("SoulAuth login failed".into()));
     }
 
     let userinfo: UserInfo = userinfo_resp.json().await.map_err(|e| {
@@ -181,7 +193,7 @@ async fn callback(
         urlencoding::encode(&next),
     );
 
-    Ok(Redirect::to(&sso_url))
+    redirect_with_clear_cookie(&sso_url)
 }
 
 async fn find_or_create_local_user(app_state: &AppState, userinfo: UserInfo) -> Result<String> {
@@ -206,7 +218,7 @@ async fn find_or_create_local_user(app_state: &AppState, userinfo: UserInfo) -> 
     let mut by_subject = db
         .query(
             "SELECT type::string(id) AS id FROM local_user
-             WHERE provider = 'soulauth' AND external_subject = $sub LIMIT 1",
+             WHERE provider = 'soulauth' AND external_subject = $sub",
         )
         .bind(("sub", &sub))
         .await
@@ -216,8 +228,8 @@ async fn find_or_create_local_user(app_state: &AppState, userinfo: UserInfo) -> 
     let users: Vec<Value> = by_subject.take(0).map_err(|e| {
         AppError::Internal(anyhow::anyhow!("local_user subject parse failed: {}", e))
     })?;
-    if let Some(row) = users.into_iter().next() {
-        return Ok(local_user_id_from_row(&row));
+    if let Some(user_id) = single_subject_user_id(users)? {
+        return Ok(user_id);
     }
 
     let mut by_email = db
@@ -323,6 +335,63 @@ fn decode_state(token: &str, secret: &str) -> Result<OidcState> {
     .map_err(|_| AppError::BadRequest("invalid or expired state".into()))
 }
 
+fn sanitize_next(next: Option<String>, default: &str) -> String {
+    let Some(next) = next else {
+        return default.to_string();
+    };
+    let next = next.trim();
+    if next.is_empty()
+        || !next.starts_with('/')
+        || next.starts_with("//")
+        || next.contains('\\')
+        || next.chars().any(char::is_control)
+    {
+        return default.to_string();
+    }
+
+    next.to_string()
+}
+
+fn validate_state_cookie(cookie_csrf: Option<&str>, state: &OidcState) -> Result<()> {
+    match cookie_csrf {
+        Some(value) if value == state.csrf => Ok(()),
+        _ => Err(AppError::BadRequest("invalid or expired state".into())),
+    }
+}
+
+fn state_cookie(csrf: &str) -> String {
+    format!(
+        "{}={}; Max-Age=600; Path={}; HttpOnly; Secure; SameSite=Lax",
+        STATE_COOKIE_NAME, csrf, STATE_COOKIE_PATH
+    )
+}
+
+fn clear_state_cookie() -> String {
+    format!(
+        "{}=; Max-Age=0; Path={}; HttpOnly; Secure; SameSite=Lax",
+        STATE_COOKIE_NAME, STATE_COOKIE_PATH
+    )
+}
+
+fn redirect_with_clear_cookie(url: &str) -> Result<Response> {
+    let mut response = Redirect::to(url).into_response();
+    response.headers_mut().append(
+        SET_COOKIE,
+        clear_state_cookie()
+            .parse()
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("clear state cookie failed: {}", e)))?,
+    );
+    Ok(response)
+}
+
+fn state_cookie_from_headers(headers: &HeaderMap) -> Option<String> {
+    let cookie_header = headers.get(COOKIE)?.to_str().ok()?;
+    cookie_header.split(';').find_map(|cookie| {
+        let (name, value) = cookie.trim().split_once('=')?;
+        (name == STATE_COOKIE_NAME).then(|| value.to_string())
+    })
+}
+
 fn build_authorize_url(
     config: &SoulAuthOidcConfig,
     state: &str,
@@ -372,6 +441,16 @@ fn local_user_id_from_row(row: &Value) -> String {
         .to_string()
 }
 
+fn single_subject_user_id(users: Vec<Value>) -> Result<Option<String>> {
+    match users.len() {
+        0 => Ok(None),
+        1 => Ok(users.first().map(local_user_id_from_row)),
+        _ => Err(AppError::Conflict(
+            "Multiple local users are linked to the same SoulAuth subject".into(),
+        )),
+    }
+}
+
 fn has_external_subject(row: &Value) -> bool {
     row.get("external_subject")
         .and_then(|value| value.as_str())
@@ -409,6 +488,7 @@ mod tests {
             nonce: "nonce-value".to_string(),
             next: Some("/docs".to_string()),
             code_verifier: "verifier-value".to_string(),
+            csrf: "csrf-value".to_string(),
             exp: (Utc::now() + Duration::minutes(10)).timestamp(),
         };
 
@@ -418,5 +498,54 @@ mod tests {
         assert_eq!(decoded.nonce, "nonce-value");
         assert_eq!(decoded.next.as_deref(), Some("/docs"));
         assert_eq!(decoded.code_verifier, "verifier-value");
+        assert_eq!(decoded.csrf, "csrf-value");
+    }
+
+    #[test]
+    fn safe_relative_next_is_accepted() {
+        assert_eq!(
+            sanitize_next(Some("/docs/login?tab=oidc#top".to_string()), "/"),
+            "/docs/login?tab=oidc#top"
+        );
+    }
+
+    #[test]
+    fn unsafe_next_values_fall_back_to_default() {
+        for next in [
+            "javascript:alert(1)",
+            "http://evil.test",
+            "https://evil.test",
+            "//evil.test/path",
+            "/docs\n<script>",
+            "",
+            "   ",
+        ] {
+            assert_eq!(sanitize_next(Some(next.to_string()), "/"), "/");
+        }
+    }
+
+    #[test]
+    fn callback_state_cookie_must_match_state_csrf() {
+        let state = OidcState {
+            nonce: "nonce-value".to_string(),
+            next: None,
+            code_verifier: "verifier-value".to_string(),
+            csrf: "csrf-value".to_string(),
+            exp: (Utc::now() + Duration::minutes(10)).timestamp(),
+        };
+
+        assert!(validate_state_cookie(Some("csrf-value"), &state).is_ok());
+        assert!(validate_state_cookie(None, &state).is_err());
+        assert!(validate_state_cookie(Some("other-value"), &state).is_err());
+    }
+
+    #[test]
+    fn duplicate_external_subject_rows_fail_instead_of_selecting_first() {
+        let rows = vec![
+            serde_json::json!({ "id": "local_user:one" }),
+            serde_json::json!({ "id": "local_user:two" }),
+        ];
+
+        assert!(single_subject_user_id(rows).is_err());
     }
 }

@@ -545,4 +545,6 @@ DEFINE FIELD external_subject ON local_user TYPE option<string>;
 DEFINE FIELD created_at ON local_user TYPE datetime DEFAULT time::now();
 DEFINE FIELD updated_at ON local_user TYPE datetime DEFAULT time::now();
 DEFINE INDEX local_user_email_unique ON local_user COLUMNS email UNIQUE;
+-- Non-unique because external_subject is optional and may be NONE for local/password users.
+-- The OIDC route fails login if duplicate non-empty provider/external_subject rows are found.
 DEFINE INDEX local_user_provider_subject_idx ON local_user COLUMNS provider, external_subject;
