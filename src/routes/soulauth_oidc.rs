@@ -193,14 +193,15 @@ async fn callback(
     if !token_resp.status().is_success() {
         let status = token_resp.status();
         let body = token_resp.text().await.unwrap_or_default();
+        let safe_body = sanitize_upstream_error(&body);
         tracing::warn!(
             status = %status,
             body_len = body.len(),
-            body = %body.chars().take(256).collect::<String>(),
+            body = %safe_body,
             "SoulAuth OIDC token exchange failed"
         );
         return Err(AppError::BadRequest(format!(
-            "SoulAuth login failed: token exchange returned {status}"
+            "SoulAuth login failed: token exchange returned {status}: {safe_body}"
         )));
     }
 
@@ -228,14 +229,15 @@ async fn callback(
     if !userinfo_resp.status().is_success() {
         let status = userinfo_resp.status();
         let body = userinfo_resp.text().await.unwrap_or_default();
+        let safe_body = sanitize_upstream_error(&body);
         tracing::warn!(
             status = %status,
             body_len = body.len(),
-            body = %body.chars().take(256).collect::<String>(),
+            body = %safe_body,
             "SoulAuth OIDC userinfo failed"
         );
         return Err(AppError::BadRequest(format!(
-            "SoulAuth login failed: userinfo returned {status}"
+            "SoulAuth login failed: userinfo returned {status}: {safe_body}"
         )));
     }
 
@@ -576,6 +578,14 @@ fn pkce_challenge(verifier: &str) -> String {
 
 fn oidc_endpoint(issuer: &str, path: &str) -> String {
     format!("{}{}", issuer.trim_end_matches('/'), path)
+}
+
+fn sanitize_upstream_error(body: &str) -> String {
+    let compact = body
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect::<String>();
+    compact.chars().take(256).collect()
 }
 
 fn local_user_id_from_row(row: &Value) -> String {
