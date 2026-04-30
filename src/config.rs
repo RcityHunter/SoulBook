@@ -13,6 +13,7 @@ pub struct Config {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct OAuthConfig {
     pub google: Option<GoogleOAuthConfig>,
+    pub soulauth: Option<SoulAuthOidcConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,6 +21,15 @@ pub struct GoogleOAuthConfig {
     pub client_id: String,
     pub client_secret: String,
     pub redirect_uri: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SoulAuthOidcConfig {
+    pub issuer: String,
+    pub client_id: String,
+    pub client_secret: String,
+    pub redirect_uri: String,
+    pub post_logout_redirect_uri: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,6 +141,29 @@ impl Config {
                         client_id,
                         client_secret,
                         redirect_uri,
+                    })
+                }
+                _ => None,
+            },
+            soulauth: match (
+                env::var("SOULAUTH_ISSUER"),
+                env::var("SOULAUTH_CLIENT_ID"),
+                env::var("SOULAUTH_CLIENT_SECRET"),
+                env::var("SOULAUTH_REDIRECT_URI"),
+            ) {
+                (Ok(issuer), Ok(client_id), Ok(client_secret), Ok(redirect_uri))
+                    if !issuer.is_empty()
+                        && !client_id.is_empty()
+                        && !client_secret.is_empty()
+                        && !redirect_uri.is_empty() =>
+                {
+                    Some(SoulAuthOidcConfig {
+                        issuer,
+                        client_id,
+                        client_secret,
+                        redirect_uri,
+                        post_logout_redirect_uri: env::var("SOULAUTH_POST_LOGOUT_REDIRECT_URI")
+                            .ok(),
                     })
                 }
                 _ => None,

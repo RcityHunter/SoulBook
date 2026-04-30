@@ -16,6 +16,7 @@ pub mod publication;
 pub mod publish;
 pub mod search;
 pub mod settings;
+pub mod soulauth_oidc;
 pub mod space_members;
 pub mod spaces;
 pub mod stats;
