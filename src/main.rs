@@ -1,7 +1,11 @@
 use axum::{
     Extension,
     extract::Query,
-    response::Html,
+    http::{
+        HeaderMap,
+        header::{COOKIE, SET_COOKIE},
+    },
+    response::{Html, IntoResponse, Response},
     routing::{Router, delete, get, post},
 };
 use chrono::{Duration as ChronoDuration, Utc};
@@ -12,6 +16,7 @@ use tokio::time::{Duration, interval};
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tracing::{info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use uuid::Uuid;
 
 mod agent;
 mod config;
@@ -273,16 +278,19 @@ struct SsoParams {
 
 async fn sso_bridge(
     Extension(state): Extension<Arc<AppState>>,
+    headers: HeaderMap,
     Query(params): Query<SsoParams>,
-) -> Html<String> {
+) -> Response {
+    let binding_cookie = sso_bridge_binding_from_headers(&headers);
     let payload = match resolve_sso_bridge_payload(
         params.bridge,
         params.token,
+        binding_cookie,
         &state.config.server.app_url,
         &state.config.auth.jwt_secret,
     ) {
         Ok(payload) => payload,
-        Err(message) => return Html(message.to_string()),
+        Err(message) => return html_with_clear_sso_bridge_cookie(message.to_string()),
     };
     let token = payload.token;
     let next = payload.next;
@@ -315,17 +323,20 @@ async fn sso_bridge(
   </body>
 </html>"#
     );
-    Html(html)
+    html_with_clear_sso_bridge_cookie(html)
 }
 
 const SSO_BRIDGE_PURPOSE: &str = "soulbook_sso_bridge";
 const SSO_BRIDGE_TTL_SECONDS: i64 = 60;
+const SSO_BRIDGE_COOKIE_NAME: &str = "soulbook_sso_bridge_binding";
+const SSO_BRIDGE_COOKIE_PATH: &str = "/sso";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SsoBridgeClaims {
     token: String,
     next: String,
     purpose: String,
+    binding: String,
     exp: i64,
 }
 
@@ -340,15 +351,20 @@ pub(crate) fn create_sso_bridge_token(
     next: Option<String>,
     default_next: &str,
     secret: &str,
+    binding: &str,
 ) -> std::result::Result<String, AppError> {
     if token.trim().is_empty() {
         return Err(AppError::BadRequest("missing token".into()));
+    }
+    if binding.trim().is_empty() {
+        return Err(AppError::BadRequest("missing bridge binding".into()));
     }
 
     let claims = SsoBridgeClaims {
         token: token.to_string(),
         next: sanitize_sso_next(next, default_next),
         purpose: SSO_BRIDGE_PURPOSE.to_string(),
+        binding: binding.to_string(),
         exp: (Utc::now() + ChronoDuration::seconds(SSO_BRIDGE_TTL_SECONDS)).timestamp(),
     };
 
@@ -363,6 +379,7 @@ pub(crate) fn create_sso_bridge_token(
 fn resolve_sso_bridge_payload(
     bridge: Option<String>,
     raw_token: Option<String>,
+    binding_cookie: Option<String>,
     default_next: &str,
     secret: &str,
 ) -> std::result::Result<SsoBridgePayload, &'static str> {
@@ -383,14 +400,53 @@ fn resolve_sso_bridge_payload(
 
     if claims.purpose != SSO_BRIDGE_PURPOSE
         || claims.token.trim().is_empty()
+        || claims.binding.trim().is_empty()
         || claims.exp <= Utc::now().timestamp()
     {
+        return Err("missing or invalid bridge");
+    }
+
+    if binding_cookie.as_deref() != Some(claims.binding.as_str()) {
         return Err("missing or invalid bridge");
     }
 
     Ok(SsoBridgePayload {
         token: claims.token,
         next: sanitize_sso_next(Some(claims.next), default_next),
+    })
+}
+
+pub(crate) fn create_sso_bridge_binding() -> String {
+    Uuid::new_v4().to_string()
+}
+
+pub(crate) fn sso_bridge_binding_cookie(binding: &str) -> String {
+    format!(
+        "{}={}; Max-Age={}; Path={}; HttpOnly; Secure; SameSite=Lax",
+        SSO_BRIDGE_COOKIE_NAME, binding, SSO_BRIDGE_TTL_SECONDS, SSO_BRIDGE_COOKIE_PATH
+    )
+}
+
+fn clear_sso_bridge_binding_cookie() -> String {
+    format!(
+        "{}=; Max-Age=0; Path={}; HttpOnly; Secure; SameSite=Lax",
+        SSO_BRIDGE_COOKIE_NAME, SSO_BRIDGE_COOKIE_PATH
+    )
+}
+
+fn html_with_clear_sso_bridge_cookie(html: String) -> Response {
+    let mut response = Html(html).into_response();
+    if let Ok(header) = clear_sso_bridge_binding_cookie().parse() {
+        response.headers_mut().append(SET_COOKIE, header);
+    }
+    response
+}
+
+fn sso_bridge_binding_from_headers(headers: &HeaderMap) -> Option<String> {
+    let cookie_header = headers.get(COOKIE)?.to_str().ok()?;
+    cookie_header.split(';').find_map(|cookie| {
+        let (name, value) = cookie.trim().split_once('=')?;
+        (name == SSO_BRIDGE_COOKIE_NAME && !value.trim().is_empty()).then(|| value.to_string())
     })
 }
 
@@ -645,18 +701,21 @@ mod tests {
     }
 
     #[test]
-    fn sso_bridge_token_round_trip_preserves_token_and_next() {
+    fn sso_bridge_with_matching_binding_cookie_is_accepted() {
+        let binding = create_sso_bridge_binding();
         let bridge = create_sso_bridge_token(
             "jwt-value",
             Some("/docs/space".to_string()),
             "https://book.test",
             "test-secret",
+            &binding,
         )
         .expect("bridge should encode");
 
         let payload = resolve_sso_bridge_payload(
             Some(bridge),
             None,
+            Some(binding),
             "https://book.test",
             "test-secret",
         )
@@ -668,17 +727,20 @@ mod tests {
 
     #[test]
     fn sso_bridge_nested_sso_next_falls_back_to_app_default() {
+        let binding = create_sso_bridge_binding();
         let bridge = create_sso_bridge_token(
             "jwt-value",
             Some("/sso?bridge=attacker".to_string()),
             "https://book.test",
             "test-secret",
+            &binding,
         )
         .expect("bridge should encode");
 
         let payload = resolve_sso_bridge_payload(
             Some(bridge),
             None,
+            Some(binding),
             "https://book.test",
             "test-secret",
         )
@@ -693,6 +755,7 @@ mod tests {
         let err = resolve_sso_bridge_payload(
             None,
             Some("attacker-token".to_string()),
+            None,
             "https://book.test",
             "test-secret",
         )
@@ -707,6 +770,7 @@ mod tests {
             token: "jwt-value".to_string(),
             next: "/docs".to_string(),
             purpose: SSO_BRIDGE_PURPOSE.to_string(),
+            binding: "binding-value".to_string(),
             exp: (chrono::Utc::now() - chrono::Duration::seconds(1)).timestamp(),
         };
         let expired_bridge = jsonwebtoken::encode(
@@ -719,10 +783,58 @@ mod tests {
         let err = resolve_sso_bridge_payload(
             Some(expired_bridge),
             None,
+            Some("binding-value".to_string()),
             "https://book.test",
             "test-secret",
         )
         .expect_err("expired bridge should be rejected");
+
+        assert_eq!(err, "missing or invalid bridge");
+    }
+
+    #[test]
+    fn sso_bridge_without_binding_cookie_is_rejected() {
+        let binding = create_sso_bridge_binding();
+        let bridge = create_sso_bridge_token(
+            "jwt-value",
+            Some("/docs".to_string()),
+            "https://book.test",
+            "test-secret",
+            &binding,
+        )
+        .expect("bridge should encode");
+
+        let err = resolve_sso_bridge_payload(
+            Some(bridge),
+            None,
+            None,
+            "https://book.test",
+            "test-secret",
+        )
+        .expect_err("bridge replay without cookie should be rejected");
+
+        assert_eq!(err, "missing or invalid bridge");
+    }
+
+    #[test]
+    fn sso_bridge_with_wrong_binding_cookie_is_rejected() {
+        let bridge = create_sso_bridge_token(
+            "jwt-value",
+            Some("/docs".to_string()),
+            "https://book.test",
+            "test-secret",
+            "binding-value",
+        )
+        .expect("bridge should encode");
+
+        let err = resolve_sso_bridge_payload(
+            Some(bridge),
+            None,
+            Some("other-binding".to_string()),
+            "https://book.test",
+            "test-secret",
+        )
+        .expect_err("bridge replay with another browser cookie should be rejected");
 
         assert_eq!(err, "missing or invalid bridge");
     }

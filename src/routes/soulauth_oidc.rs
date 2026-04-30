@@ -203,11 +203,13 @@ async fn callback(
     let user_id = find_or_create_local_user(&app_state, userinfo).await?;
     let token = issue_soulbook_token(&app_state, &user_id)?;
     let next = crate::sanitize_sso_next(state_claims.next, &app_state.config.server.app_url);
+    let bridge_binding = crate::create_sso_bridge_binding();
     let bridge = crate::create_sso_bridge_token(
         &token,
         Some(next.clone()),
         &app_state.config.server.app_url,
         &app_state.config.auth.jwt_secret,
+        &bridge_binding,
     )?;
     let sso_url = format!(
         "/sso?bridge={}&next={}",
@@ -215,7 +217,14 @@ async fn callback(
         urlencoding::encode(&next),
     );
 
-    redirect_with_clear_cookie(&sso_url)
+    let mut response = redirect_with_clear_cookie(&sso_url)?;
+    response.headers_mut().append(
+        SET_COOKIE,
+        crate::sso_bridge_binding_cookie(&bridge_binding)
+            .parse()
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("bridge cookie failed: {}", e)))?,
+    );
+    Ok(response)
 }
 
 async fn find_or_create_local_user(app_state: &AppState, userinfo: UserInfo) -> Result<String> {

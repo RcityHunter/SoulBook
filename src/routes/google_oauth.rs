@@ -1,6 +1,7 @@
 use axum::{
     extract::{Extension, Query},
-    response::Redirect,
+    http::header::SET_COOKIE,
+    response::{IntoResponse, Redirect, Response},
     routing::get,
     Router,
 };
@@ -87,7 +88,7 @@ async fn start(
 async fn callback(
     Extension(app_state): Extension<Arc<AppState>>,
     Query(params): Query<CallbackParams>,
-) -> Result<Redirect> {
+) -> Result<Response> {
     if let Some(err) = params.error {
         return Err(AppError::BadRequest(format!("Google OAuth error: {}", err)));
     }
@@ -232,11 +233,13 @@ async fn callback(
 
     // Step 5: redirect to /sso bridge — it will inject token into localStorage
     let next = crate::sanitize_sso_next(state_claims.next, &app_state.config.server.app_url);
+    let bridge_binding = crate::create_sso_bridge_binding();
     let bridge = crate::create_sso_bridge_token(
         &token,
         Some(next.clone()),
         &app_state.config.server.app_url,
         &app_state.config.auth.jwt_secret,
+        &bridge_binding,
     )?;
     let sso_url = format!(
         "/sso?bridge={}&next={}",
@@ -244,5 +247,13 @@ async fn callback(
         urlencoding::encode(&next),
     );
 
-    Ok(Redirect::to(&sso_url))
+    let mut response = Redirect::to(&sso_url).into_response();
+    response.headers_mut().append(
+        SET_COOKIE,
+        crate::sso_bridge_binding_cookie(&bridge_binding)
+            .parse()
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("bridge cookie failed: {}", e)))?,
+    );
+
+    Ok(response)
 }
