@@ -119,6 +119,27 @@ fn invitation_lookup_query() -> &'static str {
      LIMIT 1"
 }
 
+fn create_accepted_member_query() -> &'static str {
+    "CREATE space_member SET
+        space_id = type::record($space_id),
+        user_id = $user_id,
+        role = $role,
+        permissions = $permissions,
+        invited_by = $invited_by,
+        invited_at = time::now(),
+        accepted_at = time::now(),
+        status = 'accepted',
+        expires_at = NONE,
+        created_at = time::now(),
+        updated_at = time::now()"
+}
+
+fn update_invitation_usage_query() -> &'static str {
+    "UPDATE type::record($invitation_id) SET
+        used_count = used_count + 1,
+        updated_at = time::now()"
+}
+
 pub struct SpaceMemberService {
     db: Arc<Database>,
     config: Config,
@@ -673,22 +694,6 @@ impl SpaceMemberService {
             ));
         }
 
-        // 使用 SQL 查询创建成员记录，让 SurrealDB 处理所有时间字段
-        let create_member_query = r#"
-            CREATE space_member SET
-                space_id = $space_id,
-                user_id = $user_id,
-                role = $role,
-                permissions = $permissions,
-                invited_by = $invited_by,
-                invited_at = time::now(),
-                accepted_at = time::now(),
-                status = 'accepted',
-                expires_at = NONE,
-                created_at = time::now(),
-                updated_at = time::now()
-        "#;
-
         // 提取纯净的space_id和user_id，避免嵌套Thing
         let raw_space_id = invitation_space_id.clone();
         info!("Raw space_id from invitation: {}", raw_space_id);
@@ -723,8 +728,8 @@ impl SpaceMemberService {
         let mut create_result = self
             .db
             .client
-            .query(create_member_query)
-            .bind(("space_id", Thing::new("space", clean_space_id)))
+            .query(create_accepted_member_query())
+            .bind(("space_id", format!("space:{}", clean_space_id)))
             .bind(("user_id", clean_user_id))
             .bind(("role", invitation.role.clone()))
             .bind(("permissions", invitation.permissions.clone()))
@@ -754,20 +759,11 @@ impl SpaceMemberService {
                 .map(str::to_string)
                 .unwrap_or_else(|| invitation_id.clone().into_string());
 
-            let update_query = r#"
-                UPDATE $invitation_id SET
-                    used_count = used_count + 1,
-                    updated_at = time::now()
-            "#;
-
             let mut update_result = self
                 .db
                 .client
-                .query(update_query)
-                .bind((
-                    "invitation_id",
-                    Thing::new("space_invitation", invitation_record_id),
-                ))
+                .query(update_invitation_usage_query())
+                .bind(("invitation_id", format!("space_invitation:{}", invitation_record_id)))
                 .await
                 .map_err(|e| {
                     error!("Failed to update invitation used_count: {}", e);
@@ -1206,7 +1202,8 @@ mod tests {
     use super::{
         invitation_optional_assignments, inviter_display_name_from_local_user,
         invitation_lookup_query, local_user_id_from_lookup_row, normalize_space_id,
-        space_id_match_candidates, space_name_lookup_query, space_owner_where_clause,
+        create_accepted_member_query, space_id_match_candidates, space_name_lookup_query,
+        space_owner_where_clause, update_invitation_usage_query,
     };
     use crate::models::space_member::{InviteMemberRequest, MemberRole};
     use serde_json::json;
@@ -1306,5 +1303,14 @@ mod tests {
         assert!(query.contains("invite_token = $invite_token"));
         assert!(query.contains("expires_at > time::now()"));
         assert!(query.contains("LIMIT 1"));
+    }
+
+    #[test]
+    fn accept_invitation_writes_record_ids_with_type_record() {
+        let create_query = create_accepted_member_query();
+        let update_query = update_invitation_usage_query();
+
+        assert!(create_query.contains("space_id = type::record($space_id)"));
+        assert!(update_query.contains("UPDATE type::record($invitation_id)"));
     }
 }
