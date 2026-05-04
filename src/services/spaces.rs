@@ -4,7 +4,7 @@ use crate::models::space::{
     UpdateSpaceRequest,
 };
 use crate::services::auth::User;
-use crate::services::database::{record_id_key, Database};
+use crate::services::database::Database;
 use serde_json::Value;
 use std::sync::Arc;
 use surrealdb::types::RecordId as Thing;
@@ -739,16 +739,10 @@ impl SpaceService {
         let user_id_bracketed = format!("user:⟨{}⟩", clean_user_id);
         let user_id_plain = format!("user:{}", clean_user_id);
 
-        let member_query = r#"
-            SELECT space_id
-            FROM space_member
-            WHERE type::string(user_id) IN [$user_id_bracketed, $user_id_plain, $user_id_raw]
-              AND status = 'accepted'
-        "#;
-        let member_results: Vec<surrealdb::types::Value> = self
+        let space_ids: Vec<String> = self
             .db
             .client
-            .query(member_query)
+            .query(member_space_ids_query())
             .bind(("user_id_bracketed", user_id_bracketed))
             .bind(("user_id_plain", user_id_plain))
             .bind(("user_id_raw", clean_user_id.clone()))
@@ -760,15 +754,22 @@ impl SpaceService {
             .take(0)?;
 
         // 如果没有找到结果，尝试查看所有space_member记录进行调试
-        if member_results.is_empty() {
+        if space_ids.is_empty() {
             info!(
                 "No member spaces found for cleaned user_id: {} (original: {}), checking all space_member records for debugging",
                 clean_user_id, user_id
             );
-            let all_members: Vec<surrealdb::types::Value> = self
+            let all_members: Vec<Value> = self
                 .db
                 .client
-                .query("SELECT user_id, space_id, status FROM space_member LIMIT 5")
+                .query(
+                    "SELECT
+                        type::string(user_id) AS user_id,
+                        type::string(space_id) AS space_id,
+                        status
+                     FROM space_member
+                     LIMIT 5",
+                )
                 .await
                 .map_err(|e| AppError::Database(e))?
                 .take(0)?;
@@ -780,38 +781,9 @@ impl SpaceService {
 
         info!(
             "Found {} space member records for user {}",
-            member_results.len(),
+            space_ids.len(),
             user_id
         );
-
-        // 提取space_id列表
-        let mut space_ids = Vec::new();
-        for result in member_results {
-            let obj = match result {
-                surrealdb::types::Value::Object(o) => o,
-                _ => continue,
-            };
-
-            if let Some(space_id_value) = obj.get("space_id") {
-                info!("Processing space_id value: {:?}", space_id_value);
-
-                match space_id_value {
-                    surrealdb::types::Value::RecordId(t) => {
-                        let id_str = record_id_key(t);
-                        let clean_id = id_str.strip_prefix("space:").unwrap_or(&id_str);
-                        space_ids.push(clean_id.to_string());
-                        info!("Found member space_id (thing): {}", clean_id);
-                    }
-                    surrealdb::types::Value::String(s) => {
-                        let space_id_str = s.as_str();
-                        let clean_id = space_id_str.strip_prefix("space:").unwrap_or(space_id_str);
-                        space_ids.push(clean_id.to_string());
-                        info!("Found member space_id (string): {}", clean_id);
-                    }
-                    _ => {}
-                }
-            }
-        }
 
         if space_ids.is_empty() {
             info!("No member spaces found for user {}", user_id);
@@ -828,8 +800,11 @@ impl SpaceService {
                     "SELECT
                         string::replace(type::string(id), 'space:', '') AS id,
                         name, slug, description, avatar_url, is_public, is_deleted,
-                        owner_id, settings, theme_config, member_count, document_count,
-                        created_at, updated_at, created_by, updated_by
+                        (IF owner_id = NONE THEN '' ELSE type::string(owner_id) END) AS owner_id,
+                        settings, theme_config, member_count, document_count,
+                        created_at, updated_at,
+                        (IF created_by = NONE THEN '' ELSE type::string(created_by) END) AS created_by,
+                        (IF updated_by = NONE THEN '' ELSE type::string(updated_by) END) AS updated_by
                      FROM space
                      WHERE id = $space_id AND is_deleted = false",
                 )
@@ -918,6 +893,15 @@ fn create_space_optional_fields(
     fields.join("\n                ")
 }
 
+fn member_space_ids_query() -> &'static str {
+    r#"
+        SELECT VALUE string::replace(type::string(space_id), 'space:', '')
+        FROM space_member
+        WHERE type::string(user_id) IN [$user_id_bracketed, $user_id_plain, $user_id_raw]
+          AND status = 'accepted'
+    "#
+}
+
 fn sanitize_space_id_for_query(id: &str) -> Result<String> {
     let clean = id
         .strip_prefix("space:")
@@ -994,5 +978,14 @@ mod tests {
         let fields = create_space_optional_fields(&None, &Some("avatar".to_string()));
         assert!(!fields.contains("description: $description"));
         assert!(fields.contains("avatar_url: $avatar_url"));
+    }
+
+    #[test]
+    fn member_spaces_query_returns_value_strings_not_objects() {
+        let query = member_space_ids_query();
+
+        assert!(query.contains("SELECT VALUE"));
+        assert!(query.contains("type::string(space_id)"));
+        assert!(!query.contains("SELECT space_id"));
     }
 }
