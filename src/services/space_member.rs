@@ -112,6 +112,13 @@ fn space_name_lookup_query() -> &'static str {
      LIMIT 1"
 }
 
+fn invitation_lookup_query() -> &'static str {
+    "SELECT * FROM space_invitation
+     WHERE invite_token = $invite_token
+       AND expires_at > time::now()
+     LIMIT 1"
+}
+
 pub struct SpaceMemberService {
     db: Arc<Database>,
     config: Config,
@@ -626,23 +633,21 @@ impl SpaceMemberService {
             &request.invite_token
         );
 
-        // 先获取所有邀请，然后在内存中过滤（避免参数绑定问题）
-        let all_invitations: Vec<SpaceInvitationDb> = self
+        let mut invitation_result = self
             .db
             .client
-            .select("space_invitation")
+            .query(invitation_lookup_query())
+            .bind(("invite_token", request.invite_token.clone()))
             .await
             .map_err(|e| {
-                error!("Failed to select invitations: {}", e);
+                error!("Failed to query invitation by token: {}", e);
                 AppError::Database(e)
             })?;
 
-        // 在内存中过滤出匹配的邀请
-        let now = Utc::now();
-        let invitations: Vec<SpaceInvitationDb> = all_invitations
-            .into_iter()
-            .filter(|inv| inv.invite_token == request.invite_token && inv.expires_at > now)
-            .collect();
+        let invitations: Vec<SpaceInvitationDb> = invitation_result.take(0).map_err(|e| {
+            error!("Failed to parse invitation lookup result: {}", e);
+            AppError::Database(e.into())
+        })?;
 
         let invitation = invitations
             .into_iter()
@@ -1200,8 +1205,8 @@ impl SpaceMemberService {
 mod tests {
     use super::{
         invitation_optional_assignments, inviter_display_name_from_local_user,
-        local_user_id_from_lookup_row, normalize_space_id, space_id_match_candidates,
-        space_name_lookup_query, space_owner_where_clause,
+        invitation_lookup_query, local_user_id_from_lookup_row, normalize_space_id,
+        space_id_match_candidates, space_name_lookup_query, space_owner_where_clause,
     };
     use crate::models::space_member::{InviteMemberRequest, MemberRole};
     use serde_json::json;
@@ -1291,5 +1296,15 @@ mod tests {
 
         assert!(query.contains("type::string(id) = $space_id_prefixed"));
         assert!(query.contains("string::replace(type::string(id), 'space:', '') = $space_id"));
+    }
+
+    #[test]
+    fn invitation_lookup_uses_token_filter_not_full_table_select() {
+        let query = invitation_lookup_query();
+
+        assert!(query.contains("FROM space_invitation"));
+        assert!(query.contains("invite_token = $invite_token"));
+        assert!(query.contains("expires_at > time::now()"));
+        assert!(query.contains("LIMIT 1"));
     }
 }
