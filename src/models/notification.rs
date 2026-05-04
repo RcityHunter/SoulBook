@@ -13,9 +13,25 @@ pub enum NotificationType {
     System,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum FlexibleNotificationId {
+    RecordId(Thing),
+    String(String),
+}
+
+impl FlexibleNotificationId {
+    pub fn into_string(self) -> String {
+        match self {
+            FlexibleNotificationId::RecordId(thing) => record_id_to_string(&thing),
+            FlexibleNotificationId::String(value) => value,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct NotificationDb {
-    pub id: Option<Thing>,
+    pub id: Option<FlexibleNotificationId>,
     pub user_id: String,
     #[serde(rename = "type")]
     pub notification_type: NotificationType,
@@ -76,7 +92,7 @@ pub struct NotificationListQuery {
 impl From<NotificationDb> for Notification {
     fn from(db: NotificationDb) -> Self {
         Self {
-            id: db.id.map(|thing| record_id_to_string(&thing)),
+            id: db.id.map(FlexibleNotificationId::into_string),
             user_id: db.user_id,
             notification_type: db.notification_type,
             title: db.title,
@@ -91,5 +107,38 @@ impl From<NotificationDb> for Notification {
             created_at: db.created_at,
             updated_at: db.updated_at,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FlexibleNotificationId, NotificationDb};
+
+    #[test]
+    fn notification_db_accepts_string_record_ids() {
+        let notification: NotificationDb = serde_json::from_str(
+            r#"{
+                "id": "notification:p1tufjserris6owmfsun",
+                "user_id": "user-1",
+                "type": "space_invitation",
+                "title": "Invite",
+                "content": "Join",
+                "data": null,
+                "invite_token": "token-1",
+                "space_name": "Space",
+                "role": "成员",
+                "inviter_name": "Owner",
+                "is_read": false,
+                "read_at": null,
+                "created_at": "2026-05-04T08:42:08Z",
+                "updated_at": "2026-05-04T08:42:08Z"
+            }"#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            notification.id,
+            Some(FlexibleNotificationId::String(id)) if id == "notification:p1tufjserris6owmfsun"
+        ));
     }
 }
