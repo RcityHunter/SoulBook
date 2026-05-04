@@ -7,6 +7,7 @@ use crate::models::space_member::{
 use crate::services::auth::User;
 use crate::services::database::{record_id_key, Database};
 use chrono::Utc;
+use serde_json::Value;
 use std::sync::Arc;
 use surrealdb::types::RecordId as Thing;
 use tracing::{error, info, warn};
@@ -74,6 +75,19 @@ fn invitation_optional_assignments(request: &InviteMemberRequest) -> String {
     }
 
     assignments
+}
+
+fn local_user_id_from_lookup_row(row: &Value) -> Option<String> {
+    row.get("id")
+        .and_then(Value::as_str)
+        .map(|id| {
+            id.replace("local_user:", "")
+                .trim_matches(|c: char| {
+                    c == '`' || c == '⟨' || c == '⟩' || c == '"' || c == '\'' || c == ' '
+                })
+                .to_string()
+        })
+        .filter(|id| !id.is_empty())
 }
 
 pub struct SpaceMemberService {
@@ -448,10 +462,27 @@ impl SpaceMemberService {
             inviter.id, inviter.email, inviter_name
         );
 
+        let notification_user_id = if request.user_id.is_some() {
+            request.user_id.clone()
+        } else if let Some(email) = request.email.as_deref() {
+            match self.find_local_user_id_by_email(email).await {
+                Ok(user_id) => user_id,
+                Err(e) => {
+                    error!(
+                        "Failed to resolve invitee email {} to local user: {}",
+                        email, e
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         // 发送邮件和通知
         self.send_invitation_notifications(
             request.email.as_deref(),
-            request.user_id.as_deref(),
+            notification_user_id.as_deref(),
             space_id,
             &inviter_name,
             &invite_token,
@@ -465,6 +496,50 @@ impl SpaceMemberService {
         });
 
         Ok(created_invitation.into())
+    }
+
+    async fn find_local_user_id_by_email(&self, email: &str) -> Result<Option<String>> {
+        let normalized_email = email.trim().to_lowercase();
+        if normalized_email.is_empty() {
+            return Ok(None);
+        }
+
+        let mut result = self
+            .db
+            .client
+            .query("SELECT type::string(id) AS id FROM local_user WHERE email = $email LIMIT 1")
+            .bind(("email", normalized_email.clone()))
+            .await
+            .map_err(|e| {
+                error!(
+                    "Failed to look up local_user by email {}: {}",
+                    normalized_email, e
+                );
+                AppError::Database(e)
+            })?;
+
+        let users: Vec<Value> = result.take(0).map_err(|e| {
+            error!(
+                "Failed to parse local_user lookup for email {}: {}",
+                normalized_email, e
+            );
+            AppError::Database(e.into())
+        })?;
+
+        let user_id = users.first().and_then(local_user_id_from_lookup_row);
+        if let Some(user_id) = &user_id {
+            info!(
+                "Resolved invitee email {} to local user {} for station notification",
+                normalized_email, user_id
+            );
+        } else {
+            info!(
+                "Invitee email {} does not match a local user; station notification skipped",
+                normalized_email
+            );
+        }
+
+        Ok(user_id)
     }
 
     /// 接受邀请
@@ -1052,10 +1127,11 @@ impl SpaceMemberService {
 #[cfg(test)]
 mod tests {
     use super::{
-        invitation_optional_assignments, normalize_space_id, space_id_match_candidates,
-        space_owner_where_clause,
+        invitation_optional_assignments, local_user_id_from_lookup_row, normalize_space_id,
+        space_id_match_candidates, space_owner_where_clause,
     };
     use crate::models::space_member::{InviteMemberRequest, MemberRole};
+    use serde_json::json;
 
     #[test]
     fn normalizes_nested_space_record_shapes() {
@@ -1103,5 +1179,18 @@ mod tests {
         assert!(!assignments.contains("email = $email"));
         assert!(assignments.contains("user_id = $user_id"));
         assert!(!assignments.contains("message = $message"));
+    }
+
+    #[test]
+    fn extracts_clean_local_user_id_from_lookup_row() {
+        assert_eq!(
+            local_user_id_from_lookup_row(&json!({ "id": "local_user:abc-123" })),
+            Some("abc-123".to_string())
+        );
+        assert_eq!(
+            local_user_id_from_lookup_row(&json!({ "id": "local_user:⟨abc-123⟩" })),
+            Some("abc-123".to_string())
+        );
+        assert_eq!(local_user_id_from_lookup_row(&json!({ "id": "" })), None);
     }
 }
