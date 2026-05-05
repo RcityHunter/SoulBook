@@ -61,6 +61,25 @@ fn space_owner_where_clause() -> &'static str {
               AND (IF owner_id = NONE THEN '' ELSE type::string(owner_id) END) IN [$user_id_bracketed, $user_id_plain, $user_id_raw]"
 }
 
+fn space_member_list_query() -> &'static str {
+    "SELECT
+        type::string(id) AS id,
+        type::string(space_id) AS space_id,
+        type::string(user_id) AS user_id,
+        role,
+        permissions,
+        type::string(invited_by) AS invited_by,
+        invited_at,
+        accepted_at,
+        status,
+        expires_at,
+        created_at,
+        updated_at
+     FROM space_member
+     WHERE type::string(space_id) IN [$space_id_plain, $space_id_bracketed, $space_id_prefixed, $space_id_nested]
+     ORDER BY created_at ASC"
+}
+
 fn invitation_optional_assignments(request: &InviteMemberRequest) -> String {
     let mut assignments = String::new();
 
@@ -790,22 +809,29 @@ impl SpaceMemberService {
         space_id: &str,
         _requester: &User,
     ) -> Result<Vec<SpaceMemberResponse>> {
-        // 提取实际的空间ID（去掉"space:"前缀，如果存在）
-        let actual_space_id = if space_id.starts_with("space:") {
-            space_id.strip_prefix("space:").unwrap()
-        } else {
-            space_id
-        };
+        let space_id_candidates = space_id_match_candidates(space_id);
+        let space_id_plain = space_id_candidates[0].clone();
+        let space_id_bracketed = space_id_candidates[1].clone();
+        let space_id_prefixed = space_id_candidates[2].clone();
+        let space_id_nested = space_id_candidates[3].clone();
 
-        let query = "SELECT * FROM space_member WHERE space_id = $space_id ORDER BY created_at ASC";
+        info!(
+            "Listing members for space {} using candidates {:?}",
+            space_id, space_id_candidates
+        );
         let members: Vec<SpaceMemberDb> = self
             .db
             .client
-            .query(query)
-            .bind(("space_id", Thing::new("space", actual_space_id)))
+            .query(space_member_list_query())
+            .bind(("space_id_plain", space_id_plain))
+            .bind(("space_id_bracketed", space_id_bracketed))
+            .bind(("space_id_prefixed", space_id_prefixed))
+            .bind(("space_id_nested", space_id_nested))
             .await
             .map_err(|e| AppError::Database(e))?
             .take(0)?;
+
+        info!("Found {} members for space {}", members.len(), space_id);
 
         let member_responses = members
             .into_iter()
@@ -1202,8 +1228,8 @@ mod tests {
     use super::{
         invitation_optional_assignments, inviter_display_name_from_local_user,
         invitation_lookup_query, local_user_id_from_lookup_row, normalize_space_id,
-        create_accepted_member_query, space_id_match_candidates, space_name_lookup_query,
-        space_owner_where_clause, update_invitation_usage_query,
+        create_accepted_member_query, space_id_match_candidates, space_member_list_query,
+        space_name_lookup_query, space_owner_where_clause, update_invitation_usage_query,
     };
     use crate::models::space_member::{InviteMemberRequest, MemberRole};
     use serde_json::json;
@@ -1238,6 +1264,18 @@ mod tests {
         assert!(clause.contains("$space_id_prefixed"));
         assert!(clause.contains("$space_id_nested"));
         assert!(!clause.contains("id = $space_id"));
+    }
+
+    #[test]
+    fn member_list_lookup_matches_space_id_string_shapes() {
+        let query = space_member_list_query();
+
+        assert!(query.contains("type::string(space_id) IN"));
+        assert!(query.contains("$space_id_plain"));
+        assert!(query.contains("$space_id_bracketed"));
+        assert!(query.contains("$space_id_prefixed"));
+        assert!(query.contains("$space_id_nested"));
+        assert!(!query.contains("space_id = $space_id"));
     }
 
     #[test]
