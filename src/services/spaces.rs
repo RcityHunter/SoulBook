@@ -737,6 +737,8 @@ impl SpaceService {
         // 查询用户是成员的space_id列表
         let user_id_bracketed = format!("user:⟨{}⟩", clean_user_id);
         let user_id_plain = format!("user:{}", clean_user_id);
+        let local_user_id_bracketed = format!("local_user:⟨{}⟩", clean_user_id);
+        let local_user_id_plain = format!("local_user:{}", clean_user_id);
 
         let space_ids: Vec<String> = self
             .db
@@ -744,6 +746,8 @@ impl SpaceService {
             .query(member_space_ids_query())
             .bind(("user_id_bracketed", user_id_bracketed))
             .bind(("user_id_plain", user_id_plain))
+            .bind(("local_user_id_bracketed", local_user_id_bracketed))
+            .bind(("local_user_id_plain", local_user_id_plain))
             .bind(("user_id_raw", clean_user_id.clone()))
             .await
             .map_err(|e| {
@@ -897,9 +901,9 @@ fn create_space_optional_fields(
 
 fn member_space_ids_query() -> &'static str {
     r#"
-        SELECT VALUE string::replace(type::string(space_id), 'space:', '')
+        SELECT VALUE type::string(space_id)
         FROM space_member
-        WHERE type::string(user_id) IN [$user_id_bracketed, $user_id_plain, $user_id_raw]
+        WHERE type::string(user_id) IN [$user_id_bracketed, $user_id_plain, $local_user_id_bracketed, $local_user_id_plain, $user_id_raw]
           AND status = 'accepted'
     "#
 }
@@ -909,12 +913,24 @@ fn member_space_lookup_where_clause() -> &'static str {
 }
 
 fn member_space_lookup_key(space_id: &str) -> String {
-    space_id
+    let mut clean = space_id
         .trim()
-        .strip_prefix("space:")
-        .unwrap_or(space_id.trim())
-        .trim_matches(|c| c == '⟨' || c == '⟩')
-        .to_string()
+        .trim_matches(|c| c == '⟨' || c == '⟩' || c == '"' || c == '\'' || c == '`' || c == ' ')
+        .to_string();
+
+    loop {
+        let next = clean
+            .strip_prefix("space:")
+            .unwrap_or(&clean)
+            .trim_matches(|c| c == '⟨' || c == '⟩' || c == '"' || c == '\'' || c == '`' || c == ' ')
+            .to_string();
+
+        if next == clean {
+            return clean;
+        }
+
+        clean = next;
+    }
 }
 
 fn sanitize_space_id_for_query(id: &str) -> Result<String> {
@@ -1001,6 +1017,8 @@ mod tests {
 
         assert!(query.contains("SELECT VALUE"));
         assert!(query.contains("type::string(space_id)"));
+        assert!(query.contains("$local_user_id_bracketed"));
+        assert!(query.contains("$local_user_id_plain"));
         assert!(!query.contains("SELECT space_id"));
     }
 
@@ -1018,5 +1036,8 @@ mod tests {
         assert_eq!(member_space_lookup_key("space:⟨asd⟩"), "asd");
         assert_eq!(member_space_lookup_key("⟨asd⟩"), "asd");
         assert_eq!(member_space_lookup_key("space:asd"), "asd");
+        assert_eq!(member_space_lookup_key("⟨space:asd⟩"), "asd");
+        assert_eq!(member_space_lookup_key("space:⟨space:asd⟩"), "asd");
+        assert_eq!(member_space_lookup_key("space:⟨⟨space:asd⟩⟩"), "asd");
     }
 }
