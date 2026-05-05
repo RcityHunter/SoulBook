@@ -328,7 +328,9 @@ async fn list_agent_requests(
     Extension(app_state): Extension<Arc<AppState>>,
     user: User,
 ) -> Result<Json<Value>> {
-    require_admin(&user)?;
+    if require_admin(&user).is_err() {
+        return Ok(Json(agent_requests_payload(Vec::new(), false)));
+    }
 
     let db = &app_state.db.client;
     let items = match db
@@ -348,7 +350,7 @@ async fn list_agent_requests(
         }
     };
 
-    Ok(Json(json!({ "success": true, "data": { "items": items } })))
+    Ok(Json(agent_requests_payload(items, true)))
 }
 
 async fn approve_agent_request(
@@ -519,4 +521,28 @@ fn sha256_hex(input: &str) -> String {
 
     let digest = Sha256::digest(input.as_bytes());
     format!("{:x}", digest)
+}
+
+fn agent_requests_payload(items: Vec<Value>, can_manage: bool) -> Value {
+    json!({
+        "success": true,
+        "data": {
+            "items": items,
+            "can_manage": can_manage,
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_requests_payload_marks_non_admin_without_items() {
+        let payload = agent_requests_payload(Vec::new(), false);
+
+        assert_eq!(payload["success"], true);
+        assert_eq!(payload["data"]["can_manage"], false);
+        assert_eq!(payload["data"]["items"].as_array().unwrap().len(), 0);
+    }
 }
