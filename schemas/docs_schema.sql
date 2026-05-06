@@ -57,6 +57,14 @@ DEFINE FIELD cover_image ON document TYPE option<string>;
 DEFINE FIELD status ON document TYPE string DEFAULT "draft" ASSERT $value INSIDE ["draft", "published", "archived"];
 DEFINE FIELD template_id ON document TYPE option<record<document>>; -- 模板文档ID
 DEFINE FIELD metadata ON document TYPE object DEFAULT {};
+DEFINE FIELD metadata.tags ON document TYPE array<string> DEFAULT [];
+DEFINE FIELD metadata.custom_fields ON document TYPE object FLEXIBLE DEFAULT {};
+DEFINE FIELD metadata.seo ON document TYPE object DEFAULT {};
+DEFINE FIELD metadata.seo.title ON document TYPE option<string>;
+DEFINE FIELD metadata.seo.description ON document TYPE option<string>;
+DEFINE FIELD metadata.seo.keywords ON document TYPE array<string> DEFAULT [];
+DEFINE FIELD metadata.seo.og_image ON document TYPE option<string>;
+DEFINE FIELD metadata.reading_time ON document TYPE option<number>;
 DEFINE FIELD created_at ON document TYPE datetime DEFAULT time::now();
 DEFINE FIELD updated_at ON document TYPE datetime DEFAULT time::now();
 DEFINE FIELD deleted_at ON document TYPE option<datetime>;
