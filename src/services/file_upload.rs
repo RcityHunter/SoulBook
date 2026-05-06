@@ -109,6 +109,19 @@ impl FileUploadService {
         (sql, params)
     }
 
+    fn list_files_count_query(list_sql: &str) -> String {
+        list_sql
+            .replace("SELECT *", "SELECT count() AS total")
+            .replace(" ORDER BY created_at DESC", " GROUP ALL")
+    }
+
+    fn total_count_from_rows(rows: &[Value]) -> i64 {
+        rows.first()
+            .and_then(|row| row.get("total").or_else(|| row.get("count")))
+            .and_then(Value::as_i64)
+            .unwrap_or(0)
+    }
+
     fn created_row_string(row: &Value, field: &str) -> Result<String, ApiError> {
         row.get(field)
             .and_then(Value::as_str)
@@ -446,15 +459,13 @@ impl FileUploadService {
 
         let (mut sql, params) = Self::list_files_query_parts(&query);
 
-        // 获取总数 (count query must not have ORDER BY)
-        let count_sql = sql
-            .replace("SELECT *", "SELECT count()")
-            .replace(" ORDER BY created_at DESC", "");
+        // 获取总数 (SurrealDB returns aggregate counts as a row set)
+        let count_sql = Self::list_files_count_query(&sql);
         let mut query = self.db.client.query(count_sql);
         for (key, value) in &params {
             query = query.bind((*key, value.clone()));
         }
-        let total_count: Option<i64> = query
+        let total_rows: Vec<Value> = query
             .await
             .map_err(|e| {
                 error!("Failed to count files: {}", e);
@@ -462,7 +473,7 @@ impl FileUploadService {
             })?
             .take(0)?;
 
-        let total_count = total_count.unwrap_or(0);
+        let total_count = Self::total_count_from_rows(&total_rows);
 
         // 添加分页
         sql.push_str(&format!(" LIMIT {} START {}", per_page, offset));
@@ -727,6 +738,20 @@ mod tests {
                 ("file_type", "image".to_string())
             ]
         );
+    }
+
+    #[test]
+    fn list_files_count_query_reads_aggregate_total_rows() {
+        let list_sql = "SELECT * FROM file_upload WHERE is_deleted = false AND space_id = type::record($space_id) ORDER BY created_at DESC";
+
+        let count_sql = FileUploadService::list_files_count_query(list_sql);
+        let rows = vec![serde_json::json!({ "total": 4 })];
+
+        assert_eq!(
+            count_sql,
+            "SELECT count() AS total FROM file_upload WHERE is_deleted = false AND space_id = type::record($space_id) GROUP ALL"
+        );
+        assert_eq!(FileUploadService::total_count_from_rows(&rows), 4);
     }
 
     #[test]
