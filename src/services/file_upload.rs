@@ -83,8 +83,15 @@ impl FileUploadService {
         )
     }
 
+    fn list_files_select_clause() -> &'static str {
+        "SELECT type::string(id) AS id, filename, original_name, file_path, file_size, file_type, mime_type, uploaded_by, (IF space_id = NONE THEN NONE ELSE type::string(space_id) END) AS space_id, (IF document_id = NONE THEN NONE ELSE type::string(document_id) END) AS document_id, is_deleted, (IF created_at = NONE THEN '' ELSE type::string(created_at) END) AS created_at"
+    }
+
     fn list_files_query_parts(query: &FileQuery) -> (String, Vec<(&'static str, String)>) {
-        let mut sql = "SELECT * FROM file_upload WHERE is_deleted = false".to_string();
+        let mut sql = format!(
+            "{} FROM file_upload WHERE is_deleted = false",
+            Self::list_files_select_clause()
+        );
         let mut params = Vec::new();
 
         if let Some(space_id) = &query.space_id {
@@ -110,8 +117,12 @@ impl FileUploadService {
     }
 
     fn list_files_count_query(list_sql: &str) -> String {
-        list_sql
-            .replace("SELECT *", "SELECT count() AS total")
+        let from_and_where = list_sql
+            .split_once(" FROM ")
+            .map(|(_, tail)| tail)
+            .unwrap_or(list_sql);
+
+        format!("SELECT count() AS total FROM {}", from_and_where)
             .replace(" ORDER BY created_at DESC", " GROUP ALL")
     }
 
@@ -482,7 +493,7 @@ impl FileUploadService {
         for (key, value) in params {
             files_query = files_query.bind((key, value));
         }
-        let files: Vec<FileUpload> = files_query
+        let files: Vec<Value> = files_query
             .await
             .map_err(|e| {
                 error!("Failed to list files: {}", e);
@@ -490,7 +501,10 @@ impl FileUploadService {
             })?
             .take(0)?;
 
-        let file_responses: Vec<FileResponse> = files.into_iter().map(|f| f.into()).collect();
+        let file_responses: Vec<FileResponse> = files
+            .into_iter()
+            .map(Self::file_response_from_created_row)
+            .collect::<Result<Vec<_>, _>>()?;
         let total_pages = (total_count + per_page - 1) / per_page;
 
         Ok(FileListResponse {
@@ -752,6 +766,24 @@ mod tests {
             "SELECT count() AS total FROM file_upload WHERE is_deleted = false AND space_id = type::record($space_id) GROUP ALL"
         );
         assert_eq!(FileUploadService::total_count_from_rows(&rows), 4);
+    }
+
+    #[test]
+    fn list_files_query_returns_string_record_fields() {
+        let query = FileQuery {
+            space_id: Some("514".to_string()),
+            document_id: None,
+            file_type: None,
+            page: None,
+            per_page: None,
+        };
+
+        let (sql, _) = FileUploadService::list_files_query_parts(&query);
+
+        assert!(sql.contains("type::string(id) AS id"));
+        assert!(sql.contains("type::string(space_id)"));
+        assert!(sql.contains("type::string(document_id)"));
+        assert!(sql.contains("type::string(created_at)"));
     }
 
     #[test]
