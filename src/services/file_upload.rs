@@ -83,6 +83,32 @@ impl FileUploadService {
         )
     }
 
+    fn list_files_query_parts(query: &FileQuery) -> (String, Vec<(&'static str, String)>) {
+        let mut sql = "SELECT * FROM file_upload WHERE is_deleted = false".to_string();
+        let mut params = Vec::new();
+
+        if let Some(space_id) = &query.space_id {
+            let space_thing = Self::record_id_from_input("space", space_id);
+            sql.push_str(" AND space_id = type::record($space_id)");
+            params.push(("space_id", record_id_to_query_string(&space_thing)));
+        }
+
+        if let Some(document_id) = &query.document_id {
+            let doc_thing = Self::record_id_from_input("document", document_id);
+            sql.push_str(" AND document_id = type::record($document_id)");
+            params.push(("document_id", record_id_to_query_string(&doc_thing)));
+        }
+
+        if let Some(file_type) = &query.file_type {
+            sql.push_str(" AND file_type = $file_type");
+            params.push(("file_type", file_type.clone()));
+        }
+
+        sql.push_str(" ORDER BY created_at DESC");
+
+        (sql, params)
+    }
+
     fn created_row_string(row: &Value, field: &str) -> Result<String, ApiError> {
         row.get(field)
             .and_then(Value::as_str)
@@ -418,34 +444,7 @@ impl FileUploadService {
         let per_page = query.per_page.unwrap_or(20).min(100).max(1);
         let offset = (page - 1) * per_page;
 
-        let mut sql = "SELECT * FROM file_upload WHERE is_deleted = false".to_string();
-        let mut params: Vec<(&str, serde_json::Value)> = Vec::new();
-
-        // 添加筛选条件
-        if let Some(space_id) = &query.space_id {
-            let space_thing = Self::record_id_from_input("space", space_id);
-            sql.push_str(" AND space_id = $space_id");
-            params.push((
-                "space_id",
-                serde_json::Value::String(format!("space:{}", record_id_key(&space_thing))),
-            ));
-        }
-
-        if let Some(document_id) = &query.document_id {
-            let doc_thing = Self::record_id_from_input("document", document_id);
-            sql.push_str(" AND document_id = $document_id");
-            params.push((
-                "document_id",
-                serde_json::Value::String(format!("document:{}", record_id_key(&doc_thing))),
-            ));
-        }
-
-        if let Some(file_type) = &query.file_type {
-            sql.push_str(" AND file_type = $file_type");
-            params.push(("file_type", serde_json::Value::String(file_type.clone())));
-        }
-
-        sql.push_str(" ORDER BY created_at DESC");
+        let (mut sql, params) = Self::list_files_query_parts(&query);
 
         // 获取总数 (count query must not have ORDER BY)
         let count_sql = sql
@@ -453,7 +452,7 @@ impl FileUploadService {
             .replace(" ORDER BY created_at DESC", "");
         let mut query = self.db.client.query(count_sql);
         for (key, value) in &params {
-            query = query.bind((*key, value));
+            query = query.bind((*key, value.clone()));
         }
         let total_count: Option<i64> = query
             .await
@@ -470,7 +469,7 @@ impl FileUploadService {
 
         let mut files_query = self.db.client.query(sql);
         for (key, value) in params {
-            files_query = files_query.bind((key, &value));
+            files_query = files_query.bind((key, value));
         }
         let files: Vec<FileUpload> = files_query
             .await
@@ -703,6 +702,31 @@ mod tests {
         assert!(query.contains("document_id = type::record($document_id)"));
         assert!(!query.contains("deleted_at"));
         assert!(!query.contains("deleted_by"));
+    }
+
+    #[test]
+    fn list_files_query_uses_record_conversion_for_relationship_filters() {
+        let query = FileQuery {
+            space_id: Some("514".to_string()),
+            document_id: Some("document:doc-1".to_string()),
+            file_type: Some("image".to_string()),
+            page: None,
+            per_page: None,
+        };
+
+        let (sql, params) = FileUploadService::list_files_query_parts(&query);
+
+        assert!(sql.contains("space_id = type::record($space_id)"));
+        assert!(sql.contains("document_id = type::record($document_id)"));
+        assert!(sql.contains("file_type = $file_type"));
+        assert_eq!(
+            params,
+            vec![
+                ("space_id", "space:514".to_string()),
+                ("document_id", "document:doc-1".to_string()),
+                ("file_type", "image".to_string())
+            ]
+        );
     }
 
     #[test]
