@@ -14,10 +14,14 @@ pub struct FileUpload {
     pub file_type: String,
     pub mime_type: String,
     pub uploaded_by: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub space_id: Option<Thing>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub document_id: Option<Thing>,
     pub is_deleted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub deleted_at: Option<Datetime>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub deleted_by: Option<String>,
     pub created_at: Datetime,
 }
@@ -27,7 +31,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn new_file_upload_does_not_serialize_null_record_id() {
+    fn new_file_upload_does_not_serialize_null_fields() {
         let file = FileUpload::new(
             "stored.txt".to_string(),
             "original.txt".to_string(),
@@ -40,6 +44,10 @@ mod tests {
 
         let value = serde_json::to_value(file).expect("file upload should serialize");
         assert!(value.get("id").is_none());
+        assert!(value.get("space_id").is_none());
+        assert!(value.get("document_id").is_none());
+        assert!(value.get("deleted_at").is_none());
+        assert!(value.get("deleted_by").is_none());
     }
 }
 
