@@ -636,7 +636,7 @@ where
 
             let mut out = Vec::new();
             if let Some(v) = created {
-                let item: T = serde_json::from_value(v)
+                let item: T = serde_json::from_value(detag_surreal_json(v))
                     .map_err(|e| surrealdb::Error::thrown(e.to_string()))?;
                 out.push(item);
             }
@@ -706,7 +706,7 @@ where
 
             match updated {
                 Some(v) => {
-                    let item: T = serde_json::from_value(v)
+                    let item: T = serde_json::from_value(detag_surreal_json(v))
                         .map_err(|e| surrealdb::Error::thrown(e.to_string()))?;
                     Ok(Some(item))
                 }
@@ -749,13 +749,10 @@ impl Database {
         );
 
         // Verify connection with a simple query
-        storage
-            .query("RETURN 1")
-            .await
-            .map_err(|e| {
-                error!("Failed to verify database connection: {}", e);
-                AppError::Internal(anyhow::anyhow!("Database connection failed: {}", e))
-            })?;
+        storage.query("RETURN 1").await.map_err(|e| {
+            error!("Failed to verify database connection: {}", e);
+            AppError::Internal(anyhow::anyhow!("Database connection failed: {}", e))
+        })?;
 
         info!(
             "Successfully connected to SurrealDB via soulcore at {}",
@@ -774,13 +771,10 @@ impl Database {
     }
 
     pub async fn verify_connection(&self) -> Result<()> {
-        self.storage
-            .query("RETURN 1")
-            .await
-            .map_err(|e| {
-                error!("Database connection verification failed: {}", e);
-                AppError::Internal(anyhow::anyhow!("Connection verification failed: {}", e))
-            })?;
+        self.storage.query("RETURN 1").await.map_err(|e| {
+            error!("Database connection verification failed: {}", e);
+            AppError::Internal(anyhow::anyhow!("Connection verification failed: {}", e))
+        })?;
 
         info!("Database connection verified successfully");
         Ok(())
@@ -811,6 +805,36 @@ impl Database {
 
     pub fn storage(&self) -> &Arc<soulcore::engines::storage::StorageEngine> {
         &self.storage
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Deserialize;
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct RowWithTimestamp {
+        created_at: String,
+    }
+
+    #[test]
+    fn detags_created_rows_before_deserialize() {
+        let raw = serde_json::json!({
+            "created_at": {
+                "Datetime": "2026-05-06T00:00:00Z"
+            }
+        });
+
+        let row: RowWithTimestamp =
+            serde_json::from_value(detag_surreal_json(raw)).expect("row should deserialize");
+
+        assert_eq!(
+            row,
+            RowWithTimestamp {
+                created_at: "2026-05-06T00:00:00Z".to_string()
+            }
+        );
     }
 }
 
