@@ -2,6 +2,7 @@ use anyhow::Result;
 use axum::extract::Multipart;
 use image::ImageFormat;
 use mime_guess::from_path;
+use serde_json::Value;
 use std::path::Path;
 use std::sync::Arc;
 use surrealdb::types::RecordId as Thing;
@@ -82,10 +83,62 @@ impl FileUploadService {
         )
     }
 
-    async fn create_file_upload_record(
+    fn created_row_string(row: &Value, field: &str) -> Result<String, ApiError> {
+        row.get(field)
+            .and_then(Value::as_str)
+            .map(ToString::to_string)
+            .ok_or_else(|| {
+                ApiError::internal_server_error(format!(
+                    "Failed to parse created file record field: {}",
+                    field
+                ))
+            })
+    }
+
+    fn created_row_optional_string(row: &Value, field: &str) -> Option<String> {
+        row.get(field)
+            .and_then(Value::as_str)
+            .map(ToString::to_string)
+    }
+
+    fn file_response_from_created_row(row: Value) -> Result<FileResponse, ApiError> {
+        let id = Self::created_row_string(&row, "id")?;
+        let filename = Self::created_row_string(&row, "filename")?;
+        let mime_type = Self::created_row_string(&row, "mime_type")?;
+        let file_size = row
+            .get("file_size")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| {
+                ApiError::internal_server_error(
+                    "Failed to parse created file record field: file_size".to_string(),
+                )
+            })?;
+        let thumbnail_url = if mime_type.starts_with("image/") {
+            Some(format!("/api/files/{}/thumbnail", id))
+        } else {
+            None
+        };
+
+        Ok(FileResponse {
+            url: format!("/api/files/{}/download", id),
+            id,
+            filename,
+            original_name: Self::created_row_string(&row, "original_name")?,
+            file_size,
+            file_type: Self::created_row_string(&row, "file_type")?,
+            mime_type,
+            thumbnail_url,
+            space_id: Self::created_row_optional_string(&row, "space_id"),
+            document_id: Self::created_row_optional_string(&row, "document_id"),
+            uploaded_by: Self::created_row_string(&row, "uploaded_by")?,
+            created_at: Self::created_row_optional_string(&row, "created_at").unwrap_or_default(),
+        })
+    }
+
+    async fn create_file_upload_response(
         &self,
         file_upload: FileUpload,
-    ) -> Result<FileUpload, ApiError> {
+    ) -> Result<FileResponse, ApiError> {
         let mut create_query = self
             .db
             .client
@@ -111,14 +164,16 @@ impl FileUploadService {
             ApiError::internal_server_error("Failed to save file metadata".to_string())
         })?;
 
-        let created_files: Vec<FileUpload> = response.take(0).map_err(|e| {
+        let created_files: Vec<Value> = response.take(0).map_err(|e| {
             error!("Failed to parse created file upload: {}", e);
             ApiError::internal_server_error("Failed to create file record".to_string())
         })?;
 
-        created_files.into_iter().next().ok_or_else(|| {
+        let created_file = created_files.into_iter().next().ok_or_else(|| {
             ApiError::internal_server_error("Failed to create file record".to_string())
-        })
+        })?;
+
+        Self::file_response_from_created_row(created_file)
     }
 
     pub async fn upload_file(
@@ -236,10 +291,10 @@ impl FileUploadService {
                 file_upload.with_document(Self::record_id_from_input("document", document_id));
         }
 
-        let created_file = self.create_file_upload_record(file_upload).await?;
+        let created_file = self.create_file_upload_response(file_upload).await?;
 
         info!("File uploaded successfully: {}", unique_filename);
-        Ok(created_file.into())
+        Ok(created_file)
     }
 
     pub async fn upload_file_from_bytes(
@@ -328,10 +383,10 @@ impl FileUploadService {
                 file_upload.with_document(Self::record_id_from_input("document", document_id));
         }
 
-        let created_file = self.create_file_upload_record(file_upload).await?;
+        let created_file = self.create_file_upload_response(file_upload).await?;
 
         info!("File uploaded successfully: {}", unique_filename);
-        Ok(created_file.into())
+        Ok(created_file)
     }
 
     pub async fn get_file(&self, file_id: &str) -> Result<FileUpload, ApiError> {
@@ -648,5 +703,33 @@ mod tests {
         assert!(query.contains("document_id = type::record($document_id)"));
         assert!(!query.contains("deleted_at"));
         assert!(!query.contains("deleted_by"));
+    }
+
+    #[test]
+    fn file_response_from_created_row_accepts_string_record_ids() {
+        let row = serde_json::json!({
+            "id": "file_upload:abc123",
+            "filename": "stored.png",
+            "original_name": "original.png",
+            "file_size": 42,
+            "file_type": "image",
+            "mime_type": "image/png",
+            "space_id": "space:514",
+            "document_id": "document:doc-1",
+            "uploaded_by": "user-1",
+            "created_at": "2026-05-06T03:43:47.901435371Z"
+        });
+
+        let response = FileUploadService::file_response_from_created_row(row)
+            .expect("created row should parse");
+
+        assert_eq!(response.id, "file_upload:abc123");
+        assert_eq!(response.space_id.as_deref(), Some("space:514"));
+        assert_eq!(response.document_id.as_deref(), Some("document:doc-1"));
+        assert_eq!(response.url, "/api/files/file_upload:abc123/download");
+        assert_eq!(
+            response.thumbnail_url.as_deref(),
+            Some("/api/files/file_upload:abc123/thumbnail")
+        );
     }
 }
