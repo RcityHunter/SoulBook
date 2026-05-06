@@ -2,6 +2,7 @@ use anyhow::Result;
 use axum::extract::Multipart;
 use image::ImageFormat;
 use mime_guess::from_path;
+use serde_json::{Map, Value};
 use std::path::Path;
 use std::sync::Arc;
 use surrealdb::types::RecordId as Thing;
@@ -46,6 +47,32 @@ impl FileUploadService {
         } else {
             Thing::new(table, value)
         }
+    }
+
+    fn file_upload_create_payload(file: FileUpload) -> Value {
+        let mut payload = Map::new();
+
+        payload.insert("filename".to_string(), Value::String(file.filename));
+        payload.insert("original_name".to_string(), Value::String(file.original_name));
+        payload.insert("file_path".to_string(), Value::String(file.file_path));
+        payload.insert("file_size".to_string(), Value::Number(file.file_size.into()));
+        payload.insert("file_type".to_string(), Value::String(file.file_type));
+        payload.insert("mime_type".to_string(), Value::String(file.mime_type));
+        payload.insert("uploaded_by".to_string(), Value::String(file.uploaded_by));
+        payload.insert("is_deleted".to_string(), Value::Bool(file.is_deleted));
+
+        if let Some(space_id) = file.space_id {
+            payload.insert("space_id".to_string(), serde_json::to_value(space_id).unwrap());
+        }
+
+        if let Some(document_id) = file.document_id {
+            payload.insert(
+                "document_id".to_string(),
+                serde_json::to_value(document_id).unwrap(),
+            );
+        }
+
+        Value::Object(payload)
     }
 
     pub async fn upload_file(
@@ -163,18 +190,26 @@ impl FileUploadService {
                 file_upload.with_document(Self::record_id_from_input("document", document_id));
         }
 
-        let created_files: Vec<FileUpload> = self
+        let created_files: Vec<Value> = self
             .db
             .client
             .create("file_upload")
-            .content(file_upload)
+            .content(Self::file_upload_create_payload(file_upload))
             .await
             .map_err(|e| {
                 error!("Failed to save file to database: {}", e);
                 ApiError::internal_server_error("Failed to save file metadata".to_string())
             })?;
 
-        let created_file = created_files.into_iter().next();
+        let created_file = created_files
+            .into_iter()
+            .next()
+            .map(serde_json::from_value::<FileUpload>)
+            .transpose()
+            .map_err(|e| {
+                error!("Failed to parse created file upload: {}", e);
+                ApiError::internal_server_error("Failed to create file record".to_string())
+            })?;
 
         let created_file = created_file.ok_or_else(|| {
             ApiError::internal_server_error("Failed to create file record".to_string())
@@ -270,18 +305,26 @@ impl FileUploadService {
                 file_upload.with_document(Self::record_id_from_input("document", document_id));
         }
 
-        let created_files: Vec<FileUpload> = self
+        let created_files: Vec<Value> = self
             .db
             .client
             .create("file_upload")
-            .content(file_upload)
+            .content(Self::file_upload_create_payload(file_upload))
             .await
             .map_err(|e| {
                 error!("Failed to save file to database: {}", e);
                 ApiError::internal_server_error("Failed to save file metadata".to_string())
             })?;
 
-        let created_file = created_files.into_iter().next();
+        let created_file = created_files
+            .into_iter()
+            .next()
+            .map(serde_json::from_value::<FileUpload>)
+            .transpose()
+            .map_err(|e| {
+                error!("Failed to parse created file upload: {}", e);
+                ApiError::internal_server_error("Failed to create file record".to_string())
+            })?;
 
         let created_file = created_file.ok_or_else(|| {
             ApiError::internal_server_error("Failed to create file record".to_string())
@@ -578,5 +621,29 @@ impl FileUploadService {
         Path::new(&self.upload_dir)
             .join("thumbnails")
             .join(format!("thumb_{}", filename))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_upload_create_payload_omits_database_managed_fields() {
+        let file = FileUpload::new(
+            "stored.txt".to_string(),
+            "original.txt".to_string(),
+            "/tmp/stored.txt".to_string(),
+            12,
+            "text".to_string(),
+            "text/plain".to_string(),
+            "user-1".to_string(),
+        );
+
+        let payload = FileUploadService::file_upload_create_payload(file);
+
+        assert!(payload.get("created_at").is_none());
+        assert!(payload.get("deleted_at").is_none());
+        assert!(payload.get("deleted_by").is_none());
     }
 }
