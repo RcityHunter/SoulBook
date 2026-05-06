@@ -2,7 +2,7 @@ use crate::config::Config;
 use crate::error::{AppError, Result};
 use axum::{
     async_trait,
-    extract::{FromRequestParts, State},
+    extract::FromRequestParts,
     headers::{authorization::Bearer, Authorization},
     http::{request::Parts, StatusCode},
     Extension, RequestPartsExt, TypedHeader,
@@ -11,6 +11,7 @@ use chrono::{DateTime, Duration, Utc};
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -427,6 +428,45 @@ impl AuthService {
     }
 }
 
+fn is_api_key_token(token: &str) -> bool {
+    token.starts_with("sk-sd-") || token.starts_with("sk-sb-")
+}
+
+fn sha256_hex(input: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(input.as_bytes());
+    format!("{:x}", digest)
+}
+
+fn created_by_from_api_key_row(row: &Value) -> Result<String> {
+    row.get("created_by")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .map(ToString::to_string)
+        .ok_or_else(|| AppError::Authentication("Invalid token".to_string()))
+}
+
+fn ensure_api_key_not_expired(row: &Value) -> Result<()> {
+    let Some(expires_at) = row.get("expires_at").and_then(|value| value.as_str()) else {
+        return Ok(());
+    };
+
+    if expires_at.trim().is_empty() {
+        return Ok(());
+    }
+
+    let expires_at = DateTime::parse_from_rfc3339(expires_at)
+        .map_err(|_| AppError::Authentication("Invalid token".to_string()))?
+        .with_timezone(&Utc);
+
+    if expires_at <= Utc::now() {
+        return Err(AppError::Authentication("Invalid token".to_string()));
+    }
+
+    Ok(())
+}
+
 // Axum extractor for authentication
 #[async_trait]
 impl<S> FromRequestParts<S> for User
@@ -448,8 +488,54 @@ where
             .await
             .map_err(|_| AppError::Internal(anyhow::anyhow!("Auth service not found")))?;
 
+        let token = bearer.token();
+
+        if is_api_key_token(token) {
+            let Extension(app_state): Extension<Arc<crate::AppState>> = parts
+                .extract::<Extension<Arc<crate::AppState>>>()
+                .await
+                .map_err(|_| AppError::Internal(anyhow::anyhow!("App state not found")))?;
+
+            let key_hash = sha256_hex(token);
+            let mut result = app_state
+                .db
+                .client
+                .query(
+                    "SELECT created_by, scopes, expires_at FROM api_key
+                     WHERE key_hash = $key_hash AND is_deleted = false LIMIT 1",
+                )
+                .bind(("key_hash", key_hash))
+                .await
+                .map_err(|e| {
+                    warn!("API key lookup failed: {}", e);
+                    AppError::Authentication("Invalid token".to_string())
+                })?;
+
+            let rows: Vec<Value> = result.take(0).map_err(|e| {
+                warn!("API key row parse failed: {}", e);
+                AppError::Authentication("Invalid token".to_string())
+            })?;
+
+            let row = rows
+                .into_iter()
+                .next()
+                .ok_or_else(|| AppError::Authentication("Invalid token".to_string()))?;
+            ensure_api_key_not_expired(&row)?;
+            let user_id = created_by_from_api_key_row(&row)?;
+
+            let _ = app_state
+                .db
+                .client
+                .query("UPDATE api_key SET last_used_at = time::now() WHERE key_hash = $key_hash")
+                .bind(("key_hash", sha256_hex(token)))
+                .await
+                .map_err(|e| warn!("failed to update API key last_used_at: {}", e));
+
+            return Ok(auth_service.build_fallback_user(&user_id));
+        }
+
         // Verify JWT token
-        let claims = auth_service.verify_jwt(bearer.token())?;
+        let claims = auth_service.verify_jwt(token)?;
 
         // Get user details from Rainbow-Auth if integration is enabled
         if auth_service.config.auth.integration_mode {
@@ -471,6 +557,48 @@ where
                 profile: None,
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn api_key_token_detection_accepts_developer_and_agent_prefixes() {
+        assert!(is_api_key_token("sk-sd-abc"));
+        assert!(is_api_key_token("sk-sb-abc"));
+        assert!(!is_api_key_token("eyJhbGciOiJIUzI1NiJ9"));
+        assert!(!is_api_key_token("sk-other-abc"));
+    }
+
+    #[test]
+    fn api_key_hash_matches_known_sha256_hex() {
+        assert_eq!(
+            sha256_hex("sk-sd-test"),
+            "93964d5317248b26c35085a28cbc52079404f82d4936ac28a46b6e3438e5be3e"
+        );
+    }
+
+    #[test]
+    fn api_key_row_requires_created_by() {
+        let row = serde_json::json!({ "created_by": "user-1" });
+        assert_eq!(created_by_from_api_key_row(&row).unwrap(), "user-1");
+
+        let row = serde_json::json!({ "created_by": "" });
+        assert!(created_by_from_api_key_row(&row).is_err());
+    }
+
+    #[test]
+    fn api_key_expiration_allows_missing_or_future_expiry_only() {
+        assert!(ensure_api_key_not_expired(&serde_json::json!({})).is_ok());
+        assert!(ensure_api_key_not_expired(&serde_json::json!({ "expires_at": "" })).is_ok());
+
+        let future = (Utc::now() + Duration::minutes(5)).to_rfc3339();
+        assert!(ensure_api_key_not_expired(&serde_json::json!({ "expires_at": future })).is_ok());
+
+        let past = (Utc::now() - Duration::minutes(5)).to_rfc3339();
+        assert!(ensure_api_key_not_expired(&serde_json::json!({ "expires_at": past })).is_err());
     }
 }
 
