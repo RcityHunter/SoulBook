@@ -5,6 +5,7 @@ use validator::Validate;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileUpload {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<Thing>,
     pub filename: String,
     pub original_name: String,
@@ -19,6 +20,27 @@ pub struct FileUpload {
     pub deleted_at: Option<Datetime>,
     pub deleted_by: Option<String>,
     pub created_at: Datetime,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_file_upload_does_not_serialize_null_record_id() {
+        let file = FileUpload::new(
+            "stored.txt".to_string(),
+            "original.txt".to_string(),
+            "/tmp/stored.txt".to_string(),
+            12,
+            "text".to_string(),
+            "text/plain".to_string(),
+            "user-1".to_string(),
+        );
+
+        let value = serde_json::to_value(file).expect("file upload should serialize");
+        assert!(value.get("id").is_none());
+    }
 }
 
 #[derive(Debug, Deserialize, Validate)]
