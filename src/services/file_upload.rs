@@ -53,6 +53,12 @@ impl FileUploadService {
         }
     }
 
+    fn file_record_key_from_input(file_id: &str) -> &str {
+        file_id
+            .strip_prefix("file_upload:")
+            .unwrap_or(file_id)
+    }
+
     fn file_upload_create_query(file: &FileUpload) -> String {
         let space_assignment = if file.space_id.is_some() {
             "space_id = type::record($space_id),"
@@ -440,10 +446,11 @@ impl FileUploadService {
     }
 
     pub async fn get_file(&self, file_id: &str) -> Result<FileUpload, ApiError> {
+        let file_key = Self::file_record_key_from_input(file_id);
         let file: Option<FileUpload> = self
             .db
             .client
-            .select(("file_upload", file_id))
+            .select(("file_upload", file_key))
             .await
             .map_err(|e| {
                 error!("Failed to get file: {}", e);
@@ -518,6 +525,7 @@ impl FileUploadService {
 
     pub async fn delete_file(&self, user_id: &str, file_id: &str) -> Result<(), ApiError> {
         let mut file: FileUpload = self.get_file(file_id).await?;
+        let file_key = Self::file_record_key_from_input(file_id);
 
         // 检查权限
         if file.uploaded_by != user_id {
@@ -553,7 +561,7 @@ impl FileUploadService {
         let _: Option<FileUpload> = self
             .db
             .client
-            .update(("file_upload", file_id))
+            .update(("file_upload", file_key))
             .content(file)
             .await
             .map_err(|e| {
@@ -784,6 +792,15 @@ mod tests {
         assert!(sql.contains("type::string(space_id)"));
         assert!(sql.contains("type::string(document_id)"));
         assert!(sql.contains("type::string(created_at)"));
+    }
+
+    #[test]
+    fn file_record_key_accepts_full_record_id_or_key() {
+        assert_eq!(
+            FileUploadService::file_record_key_from_input("file_upload:abc123"),
+            "abc123"
+        );
+        assert_eq!(FileUploadService::file_record_key_from_input("abc123"), "abc123");
     }
 
     #[test]
