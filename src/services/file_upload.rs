@@ -5,7 +5,7 @@ use mime_guess::from_path;
 use serde_json::Value;
 use std::path::Path;
 use std::sync::Arc;
-use surrealdb::types::RecordId as Thing;
+use surrealdb::types::{Datetime, RecordId as Thing};
 use tokio::fs as async_fs;
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -155,6 +155,40 @@ impl FileUploadService {
         row.get(field)
             .and_then(Value::as_str)
             .map(ToString::to_string)
+    }
+
+    fn file_upload_from_row(row: Value) -> Result<FileUpload, ApiError> {
+        let id = Self::created_row_string(&row, "id")?;
+        let file_size = row
+            .get("file_size")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| {
+                ApiError::internal_server_error(
+                    "Failed to parse file record field: file_size".to_string(),
+                )
+            })?;
+
+        Ok(FileUpload {
+            id: Some(Self::record_id_from_input("file_upload", &id)),
+            filename: Self::created_row_string(&row, "filename")?,
+            original_name: Self::created_row_string(&row, "original_name")?,
+            file_path: Self::created_row_string(&row, "file_path")?,
+            file_size,
+            file_type: Self::created_row_string(&row, "file_type")?,
+            mime_type: Self::created_row_string(&row, "mime_type")?,
+            uploaded_by: Self::created_row_string(&row, "uploaded_by")?,
+            space_id: Self::created_row_optional_string(&row, "space_id")
+                .map(|id| Self::record_id_from_input("space", &id)),
+            document_id: Self::created_row_optional_string(&row, "document_id")
+                .map(|id| Self::record_id_from_input("document", &id)),
+            is_deleted: row
+                .get("is_deleted")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            deleted_at: None,
+            deleted_by: Self::created_row_optional_string(&row, "deleted_by"),
+            created_at: Datetime::default(),
+        })
     }
 
     fn file_response_from_created_row(row: Value) -> Result<FileResponse, ApiError> {
@@ -447,17 +481,32 @@ impl FileUploadService {
 
     pub async fn get_file(&self, file_id: &str) -> Result<FileUpload, ApiError> {
         let file_key = Self::file_record_key_from_input(file_id);
-        let file: Option<FileUpload> = self
+        let file_record_id = format!("file_upload:{}", file_key);
+        let sql = format!(
+            "{} FROM file_upload WHERE id = type::record($file_id)",
+            Self::list_files_select_clause()
+        );
+        let files: Vec<Value> = self
             .db
             .client
-            .select(("file_upload", file_key))
+            .query(sql)
+            .bind(("file_id", file_record_id))
             .await
             .map_err(|e| {
                 error!("Failed to get file: {}", e);
                 ApiError::internal_server_error("Failed to retrieve file".to_string())
+            })?
+            .take(0)
+            .map_err(|e| {
+                error!("Failed to parse file: {}", e);
+                ApiError::internal_server_error("Failed to retrieve file".to_string())
             })?;
 
-        let file = file.ok_or_else(|| ApiError::not_found("File not found".to_string()))?;
+        let file = files
+            .into_iter()
+            .next()
+            .ok_or_else(|| ApiError::not_found("File not found".to_string()))
+            .and_then(Self::file_upload_from_row)?;
 
         if file.is_deleted {
             return Err(ApiError::not_found("File not found".to_string()));
@@ -524,8 +573,9 @@ impl FileUploadService {
     }
 
     pub async fn delete_file(&self, user_id: &str, file_id: &str) -> Result<(), ApiError> {
-        let mut file: FileUpload = self.get_file(file_id).await?;
+        let file: FileUpload = self.get_file(file_id).await?;
         let file_key = Self::file_record_key_from_input(file_id);
+        let file_record_id = format!("file_upload:{}", file_key);
 
         // 检查权限
         if file.uploaded_by != user_id {
@@ -554,20 +604,21 @@ impl FileUploadService {
             }
         }
 
-        // 标记为删除
-        file.mark_deleted(user_id.to_string());
-
         // 更新数据库
-        let _: Option<FileUpload> = self
+        let _: Vec<Value> = self
             .db
             .client
-            .update(("file_upload", file_key))
-            .content(file)
+            .query(
+                "UPDATE type::record($file_id) SET is_deleted = true, deleted_at = time::now(), deleted_by = $deleted_by",
+            )
+            .bind(("file_id", file_record_id))
+            .bind(("deleted_by", user_id.to_string()))
             .await
             .map_err(|e| {
                 error!("Failed to delete file: {}", e);
                 ApiError::internal_server_error("Failed to delete file".to_string())
-            })?;
+            })?
+            .take(0)?;
 
         info!("File marked as deleted: {}", file_id);
         Ok(())
@@ -801,6 +852,32 @@ mod tests {
             "abc123"
         );
         assert_eq!(FileUploadService::file_record_key_from_input("abc123"), "abc123");
+    }
+
+    #[test]
+    fn file_upload_from_row_accepts_string_record_ids() {
+        let row = serde_json::json!({
+            "id": "file_upload:abc123",
+            "filename": "stored.png",
+            "original_name": "original.png",
+            "file_path": "/tmp/stored.png",
+            "file_size": 42,
+            "file_type": "image",
+            "mime_type": "image/png",
+            "space_id": "space:514",
+            "document_id": "document:doc-1",
+            "uploaded_by": "user-1",
+            "is_deleted": false,
+            "created_at": "2026-05-06T03:43:47.901435371Z"
+        });
+
+        let file = FileUploadService::file_upload_from_row(row)
+            .expect("file row should parse");
+
+        assert_eq!(file.filename, "stored.png");
+        assert_eq!(file.file_path, "/tmp/stored.png");
+        assert_eq!(file.space_id.as_ref().map(record_id_to_query_string).as_deref(), Some("space:514"));
+        assert_eq!(file.document_id.as_ref().map(record_id_to_query_string).as_deref(), Some("document:doc-1"));
     }
 
     #[test]
