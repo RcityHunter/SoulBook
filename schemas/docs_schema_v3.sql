@@ -254,8 +254,8 @@ DEFINE FIELD uploaded_by ON file_upload TYPE string ASSERT $value != NONE;
 DEFINE FIELD space_id ON file_upload TYPE option<record<space>>;
 DEFINE FIELD document_id ON file_upload TYPE option<record<document>>;
 DEFINE FIELD is_deleted ON file_upload TYPE bool DEFAULT false;
-DEFINE FIELD deleted_at ON file_upload TYPE datetime;
-DEFINE FIELD deleted_by ON file_upload TYPE string;
+DEFINE FIELD deleted_at ON file_upload TYPE option<datetime>;
+DEFINE FIELD deleted_by ON file_upload TYPE option<string>;
 DEFINE FIELD created_at ON file_upload TYPE datetime DEFAULT time::now();
 
 -- 文件索引
