@@ -2,7 +2,6 @@ use anyhow::Result;
 use axum::extract::Multipart;
 use image::ImageFormat;
 use mime_guess::from_path;
-use serde_json::{Map, Value};
 use std::path::Path;
 use std::sync::Arc;
 use surrealdb::types::RecordId as Thing;
@@ -19,6 +18,10 @@ use crate::{
         database::{record_id_key, Database},
     },
 };
+
+fn record_id_to_query_string(id: &Thing) -> String {
+    format!("{}:{}", id.table.as_str(), record_id_key(id))
+}
 
 #[derive(Clone)]
 pub struct FileUploadService {
@@ -49,30 +52,73 @@ impl FileUploadService {
         }
     }
 
-    fn file_upload_create_payload(file: FileUpload) -> Value {
-        let mut payload = Map::new();
+    fn file_upload_create_query(file: &FileUpload) -> String {
+        let space_assignment = if file.space_id.is_some() {
+            "space_id = type::record($space_id),"
+        } else {
+            ""
+        };
+        let document_assignment = if file.document_id.is_some() {
+            "document_id = type::record($document_id),"
+        } else {
+            ""
+        };
 
-        payload.insert("filename".to_string(), Value::String(file.filename));
-        payload.insert("original_name".to_string(), Value::String(file.original_name));
-        payload.insert("file_path".to_string(), Value::String(file.file_path));
-        payload.insert("file_size".to_string(), Value::Number(file.file_size.into()));
-        payload.insert("file_type".to_string(), Value::String(file.file_type));
-        payload.insert("mime_type".to_string(), Value::String(file.mime_type));
-        payload.insert("uploaded_by".to_string(), Value::String(file.uploaded_by));
-        payload.insert("is_deleted".to_string(), Value::Bool(file.is_deleted));
+        format!(
+            r#"
+            CREATE file_upload SET
+                filename = $filename,
+                original_name = $original_name,
+                file_path = $file_path,
+                file_size = $file_size,
+                file_type = $file_type,
+                mime_type = $mime_type,
+                uploaded_by = $uploaded_by,
+                {}{}
+                is_deleted = false,
+                created_at = time::now()
+            "#,
+            space_assignment, document_assignment
+        )
+    }
 
-        if let Some(space_id) = file.space_id {
-            payload.insert("space_id".to_string(), serde_json::to_value(space_id).unwrap());
+    async fn create_file_upload_record(
+        &self,
+        file_upload: FileUpload,
+    ) -> Result<FileUpload, ApiError> {
+        let mut create_query = self
+            .db
+            .client
+            .query(Self::file_upload_create_query(&file_upload))
+            .bind(("filename", file_upload.filename.clone()))
+            .bind(("original_name", file_upload.original_name.clone()))
+            .bind(("file_path", file_upload.file_path.clone()))
+            .bind(("file_size", file_upload.file_size))
+            .bind(("file_type", file_upload.file_type.clone()))
+            .bind(("mime_type", file_upload.mime_type.clone()))
+            .bind(("uploaded_by", file_upload.uploaded_by.clone()));
+
+        if let Some(space_id) = &file_upload.space_id {
+            create_query = create_query.bind(("space_id", record_id_to_query_string(space_id)));
+        }
+        if let Some(document_id) = &file_upload.document_id {
+            create_query =
+                create_query.bind(("document_id", record_id_to_query_string(document_id)));
         }
 
-        if let Some(document_id) = file.document_id {
-            payload.insert(
-                "document_id".to_string(),
-                serde_json::to_value(document_id).unwrap(),
-            );
-        }
+        let mut response = create_query.await.map_err(|e| {
+            error!("Failed to save file to database: {}", e);
+            ApiError::internal_server_error("Failed to save file metadata".to_string())
+        })?;
 
-        Value::Object(payload)
+        let created_files: Vec<FileUpload> = response.take(0).map_err(|e| {
+            error!("Failed to parse created file upload: {}", e);
+            ApiError::internal_server_error("Failed to create file record".to_string())
+        })?;
+
+        created_files.into_iter().next().ok_or_else(|| {
+            ApiError::internal_server_error("Failed to create file record".to_string())
+        })
     }
 
     pub async fn upload_file(
@@ -190,30 +236,7 @@ impl FileUploadService {
                 file_upload.with_document(Self::record_id_from_input("document", document_id));
         }
 
-        let created_files: Vec<Value> = self
-            .db
-            .client
-            .create("file_upload")
-            .content(Self::file_upload_create_payload(file_upload))
-            .await
-            .map_err(|e| {
-                error!("Failed to save file to database: {}", e);
-                ApiError::internal_server_error("Failed to save file metadata".to_string())
-            })?;
-
-        let created_file = created_files
-            .into_iter()
-            .next()
-            .map(serde_json::from_value::<FileUpload>)
-            .transpose()
-            .map_err(|e| {
-                error!("Failed to parse created file upload: {}", e);
-                ApiError::internal_server_error("Failed to create file record".to_string())
-            })?;
-
-        let created_file = created_file.ok_or_else(|| {
-            ApiError::internal_server_error("Failed to create file record".to_string())
-        })?;
+        let created_file = self.create_file_upload_record(file_upload).await?;
 
         info!("File uploaded successfully: {}", unique_filename);
         Ok(created_file.into())
@@ -305,30 +328,7 @@ impl FileUploadService {
                 file_upload.with_document(Self::record_id_from_input("document", document_id));
         }
 
-        let created_files: Vec<Value> = self
-            .db
-            .client
-            .create("file_upload")
-            .content(Self::file_upload_create_payload(file_upload))
-            .await
-            .map_err(|e| {
-                error!("Failed to save file to database: {}", e);
-                ApiError::internal_server_error("Failed to save file metadata".to_string())
-            })?;
-
-        let created_file = created_files
-            .into_iter()
-            .next()
-            .map(serde_json::from_value::<FileUpload>)
-            .transpose()
-            .map_err(|e| {
-                error!("Failed to parse created file upload: {}", e);
-                ApiError::internal_server_error("Failed to create file record".to_string())
-            })?;
-
-        let created_file = created_file.ok_or_else(|| {
-            ApiError::internal_server_error("Failed to create file record".to_string())
-        })?;
+        let created_file = self.create_file_upload_record(file_upload).await?;
 
         info!("File uploaded successfully: {}", unique_filename);
         Ok(created_file.into())
@@ -629,7 +629,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn file_upload_create_payload_omits_database_managed_fields() {
+    fn file_upload_create_query_uses_record_conversion_for_relationships() {
         let file = FileUpload::new(
             "stored.txt".to_string(),
             "original.txt".to_string(),
@@ -638,12 +638,15 @@ mod tests {
             "text".to_string(),
             "text/plain".to_string(),
             "user-1".to_string(),
-        );
+        )
+        .with_space(Thing::new("space", "space-1"))
+        .with_document(Thing::new("document", "document-1"));
 
-        let payload = FileUploadService::file_upload_create_payload(file);
+        let query = FileUploadService::file_upload_create_query(&file);
 
-        assert!(payload.get("created_at").is_none());
-        assert!(payload.get("deleted_at").is_none());
-        assert!(payload.get("deleted_by").is_none());
+        assert!(query.contains("space_id = type::record($space_id)"));
+        assert!(query.contains("document_id = type::record($document_id)"));
+        assert!(!query.contains("deleted_at"));
+        assert!(!query.contains("deleted_by"));
     }
 }
