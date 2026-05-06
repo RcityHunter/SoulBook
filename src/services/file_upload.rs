@@ -171,18 +171,13 @@ impl FileUploadService {
             .await
             .map_err(|e| {
                 error!("Failed to save file to database: {}", e);
-                ApiError::bad_request(format!(
-                    "File upload diagnostics: failed to save metadata: {}",
-                    e
-                ))
+                ApiError::internal_server_error("Failed to save file metadata".to_string())
             })?;
 
         let created_file = created_files.into_iter().next();
 
         let created_file = created_file.ok_or_else(|| {
-            ApiError::bad_request(
-                "File upload diagnostics: database returned no file record".to_string(),
-            )
+            ApiError::internal_server_error("Failed to create file record".to_string())
         })?;
 
         info!("File uploaded successfully: {}", unique_filename);
@@ -283,18 +278,13 @@ impl FileUploadService {
             .await
             .map_err(|e| {
                 error!("Failed to save file to database: {}", e);
-                ApiError::bad_request(format!(
-                    "File upload diagnostics: failed to save metadata: {}",
-                    e
-                ))
+                ApiError::internal_server_error("Failed to save file metadata".to_string())
             })?;
 
         let created_file = created_files.into_iter().next();
 
         let created_file = created_file.ok_or_else(|| {
-            ApiError::bad_request(
-                "File upload diagnostics: database returned no file record".to_string(),
-            )
+            ApiError::internal_server_error("Failed to create file record".to_string())
         })?;
 
         info!("File uploaded successfully: {}", unique_filename);

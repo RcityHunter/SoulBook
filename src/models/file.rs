@@ -23,6 +23,7 @@ pub struct FileUpload {
     pub deleted_at: Option<Datetime>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deleted_by: Option<String>,
+    #[serde(skip_serializing)]
     pub created_at: Datetime,
 }
 
@@ -48,6 +49,7 @@ mod tests {
         assert!(value.get("document_id").is_none());
         assert!(value.get("deleted_at").is_none());
         assert!(value.get("deleted_by").is_none());
+        assert!(value.get("created_at").is_none());
     }
 }
 
