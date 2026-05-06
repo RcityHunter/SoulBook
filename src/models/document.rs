@@ -41,15 +41,19 @@ pub struct DocumentMetadata {
     pub custom_fields: HashMap<String, serde_json::Value>,
     #[serde(default)]
     pub seo: SeoMetadata,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reading_time: Option<u32>, // in minutes
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SeoMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(default)]
     pub keywords: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub og_image: Option<String>,
 }
 
@@ -439,6 +443,16 @@ impl From<Document> for DocumentListItem {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_metadata_serializes_without_null_optional_fields() {
+        let value = serde_json::to_value(DocumentMetadata::default()).unwrap();
+
+        assert!(value.get("reading_time").is_none());
+        assert!(value["seo"].get("title").is_none());
+        assert!(value["seo"].get("description").is_none());
+        assert!(value["seo"].get("og_image").is_none());
+    }
 
     #[test]
     fn test_document_creation() {
