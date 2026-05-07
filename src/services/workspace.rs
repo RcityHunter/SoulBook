@@ -128,8 +128,7 @@ impl WorkspaceService {
                 "SELECT team_id, role
                  FROM team_member
                  WHERE user_id IN $user_ids
-                   AND status = 'active'
-                 ORDER BY joined_at DESC",
+                   AND status = 'active'",
             )
             .bind(("user_ids", user_ids))
             .await
