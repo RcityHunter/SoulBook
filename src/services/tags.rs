@@ -39,22 +39,28 @@ impl TagService {
             ));
         }
 
-        let space_thing = if let Some(space_id) = &request.space_id {
-            Some(Thing::new("space", space_id.as_str()))
-        } else {
-            None
-        };
-
-        let tag = Tag::new(request.name, request.color, creator_id.to_string())
-            .with_description(request.description.unwrap_or_default())
-            .with_space(space_thing);
-
-        let created: Vec<Tag> = self
+        let tag = Tag::new(request.name.clone(), request.color.clone(), creator_id.to_string());
+        let create_sql = create_tag_sql(&request.space_id);
+        let mut create_query = self
             .db
             .client
-            .create("tag")
-            .content(tag)
+            .query(create_sql)
+            .bind(("name", tag.name.clone()))
+            .bind(("slug", tag.slug.clone()))
+            .bind(("description", request.description.unwrap_or_default()))
+            .bind(("color", tag.color.clone()))
+            .bind(("created_by", creator_id.to_string()));
+
+        if let Some(space_id) = &request.space_id {
+            create_query = create_query.bind(("space_id", Thing::new("space", space_id.as_str())));
+        }
+
+        let mut created_response = create_query
             .await
+            .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+
+        let created: Vec<Tag> = created_response
+            .take(0)
             .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
 
         created
@@ -501,10 +507,59 @@ impl TagService {
     }
 }
 
+fn create_tag_sql(space_id: &Option<String>) -> &'static str {
+    if space_id.is_some() {
+        "CREATE tag CONTENT {
+            name: $name,
+            slug: $slug,
+            description: $description,
+            color: $color,
+            space_id: $space_id,
+            usage_count: 0,
+            created_by: $created_by,
+            created_at: time::now(),
+            updated_at: time::now()
+        }"
+    } else {
+        "CREATE tag CONTENT {
+            name: $name,
+            slug: $slug,
+            description: $description,
+            color: $color,
+            usage_count: 0,
+            created_by: $created_by,
+            created_at: time::now(),
+            updated_at: time::now()
+        }"
+    }
+}
+
 #[derive(Debug, serde::Serialize)]
 pub struct TagStatistics {
     pub total_tags: i64,
     pub used_tags: i64,
     pub unused_tags: i64,
     pub most_used_tags: Vec<Tag>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_tag_sql_omits_record_id_and_optional_none_space() {
+        let sql = create_tag_sql(&None);
+
+        assert!(sql.contains("CREATE tag CONTENT"));
+        assert!(!sql.contains("id:"));
+        assert!(!sql.contains("space_id: $space_id"));
+    }
+
+    #[test]
+    fn create_tag_sql_includes_space_when_provided() {
+        let sql = create_tag_sql(&Some("space-id".to_string()));
+
+        assert!(sql.contains("space_id: $space_id"));
+        assert!(!sql.contains("id:"));
+    }
 }
