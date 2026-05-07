@@ -160,11 +160,7 @@ impl TagService {
     ) -> Result<Vec<Tag>, ApiError> {
         let offset = (page - 1) * per_page;
 
-        let query = if let Some(space_id) = space_id {
-            "SELECT * FROM tag WHERE space_id = $space_id ORDER BY usage_count DESC, name ASC LIMIT $limit START $offset"
-        } else {
-            "SELECT * FROM tag WHERE space_id IS NULL ORDER BY usage_count DESC, name ASC LIMIT $limit START $offset"
-        };
+        let query = tag_list_sql(space_id);
 
         let mut db_query = self.db.client.query(query);
 
@@ -188,11 +184,7 @@ impl TagService {
         space_id: Option<&str>,
         limit: i64,
     ) -> Result<Vec<Tag>, ApiError> {
-        let query = if let Some(space_id) = space_id {
-            "SELECT * FROM tag WHERE space_id = $space_id AND usage_count > 0 ORDER BY usage_count DESC LIMIT $limit"
-        } else {
-            "SELECT * FROM tag WHERE space_id IS NULL AND usage_count > 0 ORDER BY usage_count DESC LIMIT $limit"
-        };
+        let query = popular_tags_sql(space_id);
 
         let mut db_query = self.db.client.query(query);
 
@@ -216,11 +208,7 @@ impl TagService {
         query: &str,
         limit: i64,
     ) -> Result<Vec<Tag>, ApiError> {
-        let search_query = if let Some(space_id) = space_id {
-            "SELECT * FROM tag WHERE space_id = $space_id AND (name CONTAINSTEXT $query OR description CONTAINSTEXT $query) ORDER BY usage_count DESC LIMIT $limit"
-        } else {
-            "SELECT * FROM tag WHERE space_id IS NULL AND (name CONTAINSTEXT $query OR description CONTAINSTEXT $query) ORDER BY usage_count DESC LIMIT $limit"
-        };
+        let search_query = search_tags_sql(space_id);
 
         let mut db_query = self.db.client.query(search_query);
 
@@ -366,11 +354,7 @@ impl TagService {
         &self,
         space_id: Option<&str>,
     ) -> Result<TagStatistics, ApiError> {
-        let total_query = if let Some(space_id) = space_id {
-            "SELECT count() as total FROM tag WHERE space_id = $space_id GROUP ALL"
-        } else {
-            "SELECT count() as total FROM tag WHERE space_id IS NULL GROUP ALL"
-        };
+        let total_query = tag_total_count_sql(space_id);
 
         let mut db_query = self.db.client.query(total_query);
         if let Some(space_id) = space_id {
@@ -389,11 +373,7 @@ impl TagService {
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
 
-        let used_query = if let Some(space_id) = space_id {
-            "SELECT count() as used FROM tag WHERE space_id = $space_id AND usage_count > 0 GROUP ALL"
-        } else {
-            "SELECT count() as used FROM tag WHERE space_id IS NULL AND usage_count > 0 GROUP ALL"
-        };
+        let used_query = tag_used_count_sql(space_id);
 
         let mut db_query = self.db.client.query(used_query);
         if let Some(space_id) = space_id {
@@ -426,11 +406,7 @@ impl TagService {
         space_id: &Option<String>,
         name: &str,
     ) -> Result<bool, ApiError> {
-        let query = if let Some(space_id) = space_id {
-            "SELECT count() FROM tag WHERE space_id = $space_id AND name = $name GROUP ALL"
-        } else {
-            "SELECT count() FROM tag WHERE space_id IS NULL AND name = $name GROUP ALL"
-        };
+        let query = tag_exists_sql(space_id);
 
         let mut db_query = self.db.client.query(query);
         if let Some(space_id) = space_id {
@@ -536,6 +512,54 @@ fn create_tag_sql(space_id: &Option<String>) -> &'static str {
     }
 }
 
+fn tag_list_sql(space_id: Option<&str>) -> &'static str {
+    if space_id.is_some() {
+        "SELECT * FROM tag WHERE space_id = $space_id ORDER BY usage_count DESC, name ASC LIMIT $limit START $offset"
+    } else {
+        "SELECT * FROM tag WHERE (space_id = NONE OR space_id = NULL) ORDER BY usage_count DESC, name ASC LIMIT $limit START $offset"
+    }
+}
+
+fn popular_tags_sql(space_id: Option<&str>) -> &'static str {
+    if space_id.is_some() {
+        "SELECT * FROM tag WHERE space_id = $space_id AND usage_count > 0 ORDER BY usage_count DESC LIMIT $limit"
+    } else {
+        "SELECT * FROM tag WHERE (space_id = NONE OR space_id = NULL) AND usage_count > 0 ORDER BY usage_count DESC LIMIT $limit"
+    }
+}
+
+fn search_tags_sql(space_id: Option<&str>) -> &'static str {
+    if space_id.is_some() {
+        "SELECT * FROM tag WHERE space_id = $space_id AND (name CONTAINSTEXT $query OR description CONTAINSTEXT $query) ORDER BY usage_count DESC LIMIT $limit"
+    } else {
+        "SELECT * FROM tag WHERE (space_id = NONE OR space_id = NULL) AND (name CONTAINSTEXT $query OR description CONTAINSTEXT $query) ORDER BY usage_count DESC LIMIT $limit"
+    }
+}
+
+fn tag_total_count_sql(space_id: Option<&str>) -> &'static str {
+    if space_id.is_some() {
+        "SELECT count() as total FROM tag WHERE space_id = $space_id GROUP ALL"
+    } else {
+        "SELECT count() as total FROM tag WHERE (space_id = NONE OR space_id = NULL) GROUP ALL"
+    }
+}
+
+fn tag_used_count_sql(space_id: Option<&str>) -> &'static str {
+    if space_id.is_some() {
+        "SELECT count() as used FROM tag WHERE space_id = $space_id AND usage_count > 0 GROUP ALL"
+    } else {
+        "SELECT count() as used FROM tag WHERE (space_id = NONE OR space_id = NULL) AND usage_count > 0 GROUP ALL"
+    }
+}
+
+fn tag_exists_sql(space_id: &Option<String>) -> &'static str {
+    if space_id.is_some() {
+        "SELECT count() FROM tag WHERE space_id = $space_id AND name = $name GROUP ALL"
+    } else {
+        "SELECT count() FROM tag WHERE (space_id = NONE OR space_id = NULL) AND name = $name GROUP ALL"
+    }
+}
+
 fn extract_created_tag_id(value: &serde_json::Value) -> Option<String> {
     let raw_id = value.get("id")?.as_str()?;
 
@@ -569,6 +593,23 @@ mod tests {
 
         assert!(sql.contains("space_id: $space_id"));
         assert!(!sql.contains("\n            id:"));
+    }
+
+    #[test]
+    fn global_tag_queries_match_missing_or_null_space_id() {
+        let queries = [
+            tag_list_sql(None),
+            popular_tags_sql(None),
+            search_tags_sql(None),
+            tag_total_count_sql(None),
+            tag_used_count_sql(None),
+            tag_exists_sql(&None),
+        ];
+
+        for query in queries {
+            assert!(query.contains("(space_id = NONE OR space_id = NULL)"));
+            assert!(!query.contains("space_id IS NULL"));
+        }
     }
 
     #[test]
