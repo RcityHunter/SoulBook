@@ -676,54 +676,28 @@ impl SpaceService {
     pub async fn get_space_stats(&self, space_id: &str) -> Result<SpaceStats> {
         let space_id = sanitize_space_id_for_query(space_id)?;
         let queries = space_stats_queries();
+        let record_id = format!("space:{}", space_id);
 
         // 查询文档数量
-        let doc_count: Option<u32> = self
-            .db
-            .client
-            .query(queries.document_count)
-            .bind(("space_id", format!("space:{}", space_id)))
-            .await
-            .map_err(|e| AppError::Database(e))?
-            .take((0, "count"))?;
+        let doc_count = self.query_space_stats_count(queries.document_count, &record_id).await?;
 
         // 查询公开文档数量
-        let public_doc_count: Option<u32> = self
-            .db
-            .client
-            .query(queries.public_document_count)
-            .bind(("space_id", format!("space:{}", space_id)))
-            .await
-            .map_err(|e| AppError::Database(e))?
-            .take((0, "count"))?;
+        let public_doc_count = self
+            .query_space_stats_count(queries.public_document_count, &record_id)
+            .await?;
 
-        let member_count: Option<u32> = self
-            .db
-            .client
-            .query(queries.member_count)
-            .bind(("space_id", format!("space:{}", space_id)))
-            .await
-            .map_err(|e| AppError::Database(e))?
-            .take((0, "count"))?;
+        let member_count = self
+            .query_space_stats_count(queries.member_count, &record_id)
+            .await?;
 
-        let tag_count: Option<u32> = self
-            .db
-            .client
-            .query(queries.tag_count)
-            .bind(("space_id", format!("space:{}", space_id)))
-            .await
-            .map_err(|e| AppError::Database(e))?
-            .take((0, "count"))?;
+        let tag_count = self
+            .query_space_stats_count(queries.tag_count, &record_id)
+            .await?;
 
         // 查询评论数量
-        let comment_count: Option<u32> = self
-            .db
-            .client
-            .query(queries.comment_count)
-            .bind(("space_id", format!("space:{}", space_id)))
-            .await
-            .map_err(|e| AppError::Database(e))?
-            .take((0, "count"))?;
+        let comment_count = self
+            .query_space_stats_count(queries.comment_count, &record_id)
+            .await?;
 
         // 查询总浏览量。SurrealDB 3 的 math::sum expects array<number>，
         // 对字段直接聚合会报类型错误，所以这里读取行后在 Rust 侧求和。
@@ -731,7 +705,7 @@ impl SpaceService {
             .db
             .client
             .query(queries.view_count)
-            .bind(("space_id", format!("space:{}", space_id)))
+            .bind(("space_id", record_id.clone()))
             .await
             .map_err(|e| AppError::Database(e))?
             .take(0)?;
@@ -745,24 +719,43 @@ impl SpaceService {
             .db
             .client
             .query(queries.last_activity)
-            .bind(("space_id", format!("space:{}", space_id)))
+            .bind(("space_id", record_id))
             .await
             .map_err(|e| AppError::Database(e))?
-            .take((0, "updated_at"))?;
+            .take::<Vec<Value>>(0)?
+            .into_iter()
+            .find_map(|row| {
+                row.get("updated_at")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string)
+            });
 
         let last_activity = last_activity
             .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
             .map(|dt| dt.with_timezone(&chrono::Utc));
 
         Ok(SpaceStats {
-            document_count: doc_count.unwrap_or(0),
-            public_document_count: public_doc_count.unwrap_or(0),
-            member_count: member_count.unwrap_or(0),
-            tag_count: tag_count.unwrap_or(0),
-            comment_count: comment_count.unwrap_or(0),
+            document_count: doc_count,
+            public_document_count: public_doc_count,
+            member_count,
+            tag_count,
+            comment_count,
             view_count,
             last_activity,
         })
+    }
+
+    async fn query_space_stats_count(&self, query: &str, record_id: &str) -> Result<u32> {
+        let rows: Vec<Value> = self
+            .db
+            .client
+            .query(query)
+            .bind(("space_id", record_id.to_string()))
+            .await
+            .map_err(AppError::Database)?
+            .take(0)?;
+
+        Ok(first_count_from_rows(&rows))
     }
 
     /// 获取用户作为成员的空间列表
@@ -1038,6 +1031,13 @@ fn sanitize_space_id_for_query(id: &str) -> Result<String> {
     Err(AppError::Validation("invalid space id format".to_string()))
 }
 
+fn first_count_from_rows(rows: &[Value]) -> u32 {
+    rows.first()
+        .and_then(|row| row.get("count"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as u32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1175,6 +1175,15 @@ mod tests {
             assert!(query.contains("count() AS count"));
             assert!(query.contains("GROUP ALL"));
         }
+    }
+
+    #[test]
+    fn space_stats_count_rows_extract_first_count() {
+        let rows = vec![serde_json::json!({ "count": 3 })];
+
+        assert_eq!(first_count_from_rows(&rows), 3);
+        assert_eq!(first_count_from_rows(&[]), 0);
+        assert_eq!(first_count_from_rows(&[serde_json::json!({})]), 0);
     }
 
     #[test]
