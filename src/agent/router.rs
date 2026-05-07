@@ -193,6 +193,8 @@ async fn list_spaces(
                 limit: query.limit,
                 search: query.search,
                 owner_id: query.owner_id,
+                workspace: None,
+                team_id: None,
                 is_public: query.is_public,
                 sort: query.sort,
                 order: query.order,

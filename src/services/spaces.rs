@@ -48,6 +48,8 @@ impl SpaceService {
             ));
         }
 
+        let workspace_values = create_space_workspace_values(&request)?;
+
         // 创建空间对象
         let mut space = Space::new(request.name, request.slug.clone(), user.id.clone());
 
@@ -78,6 +80,8 @@ impl SpaceService {
                 __OPTIONAL_FIELDS__
                 is_public: $is_public,
                 is_deleted: false,
+                workspace_kind: $workspace_kind,
+                team_id: $team_id,
                 owner_id: $owner_id,
                 settings: {},
                 theme_config: {},
@@ -98,6 +102,8 @@ impl SpaceService {
             .bind(("name", space.name.clone()))
             .bind(("slug", space.slug.clone()))
             .bind(("is_public", space.is_public))
+            .bind(("workspace_kind", workspace_values.workspace_kind))
+            .bind(("team_id", workspace_values.team_id))
             .bind(("owner_id", space.owner_id.clone()))
             .bind(("created_by", user.id.clone()))
             .bind(("updated_by", user.id.clone()));
@@ -190,21 +196,7 @@ impl SpaceService {
             // 1. 先获取用户拥有的空间
             // 2. 再获取用户加入的空间，然后合并
 
-            // 这里先查询用户拥有的空间（owner_id 可能是 Thing，需要转成字符串比较）
-            let user_id_raw = user.id.clone();
-            let user_id_bracketed = format!("user:{}", user_id_raw);
-            let user_id_plain = user_id_raw
-                .trim_matches(|c| c == '⟨' || c == '⟩')
-                .to_string();
-            let user_id_plain_prefixed = format!("user:{}", user_id_plain);
-
-            where_conditions.push("(IF owner_id = NONE THEN '' ELSE type::string(owner_id) END) IN [$user_id_raw, $user_id_bracketed, $user_id_plain_prefixed]");
-            params.insert("user_id_raw".to_string(), user_id_raw.into());
-            params.insert("user_id_bracketed".to_string(), user_id_bracketed.into());
-            params.insert(
-                "user_id_plain_prefixed".to_string(),
-                user_id_plain_prefixed.into(),
-            );
+            apply_user_space_visibility_scope(&query, user, &mut where_conditions, &mut params);
         } else {
             // 未登录用户看不到任何空间列表
             where_conditions.push("1 = 0");
@@ -241,6 +233,8 @@ impl SpaceService {
             where_conditions.push("is_public = $is_public");
             params.insert("is_public".to_string(), is_public.into());
         }
+
+        apply_workspace_scope(&query, &mut where_conditions, &mut params)?;
 
         let where_clause = if where_conditions.is_empty() {
             String::new()
@@ -302,7 +296,17 @@ impl SpaceService {
             .take(0)?;
 
         // 如果是登录用户，还需要添加用户作为成员的空间
-        if let Some(user) = user {
+        if user.is_some() {
+            let include_member_spaces = query.workspace.as_deref().unwrap_or("personal") != "team";
+            if !include_member_spaces {
+                info!(
+                    "Skipping user member-space merge for team workspace query: {:?}",
+                    query.team_id
+                );
+            }
+        }
+
+        if let Some(user) = user.filter(|_| query.workspace.as_deref().unwrap_or("personal") != "team") {
             let member_spaces = self.get_user_member_spaces(&user.id).await?;
             info!(
                 "Found {} member spaces for user {}",
@@ -939,6 +943,99 @@ fn create_space_optional_fields(
     fields.join("\n                ")
 }
 
+struct CreateSpaceWorkspaceValues {
+    workspace_kind: String,
+    team_id: Option<String>,
+}
+
+fn create_space_workspace_values(
+    request: &CreateSpaceRequest,
+) -> Result<CreateSpaceWorkspaceValues> {
+    match request.workspace.as_deref().unwrap_or("personal") {
+        "team" => {
+            let team_id = request.team_id.as_deref().ok_or_else(|| {
+                AppError::Validation("team_id is required for team workspace".to_string())
+            })?;
+
+            Ok(CreateSpaceWorkspaceValues {
+                workspace_kind: "team".to_string(),
+                team_id: Some(team_id.to_string()),
+            })
+        }
+        "personal" | "" => Ok(CreateSpaceWorkspaceValues {
+            workspace_kind: "personal".to_string(),
+            team_id: None,
+        }),
+        other => Err(AppError::Validation(format!(
+            "unsupported workspace scope: {}",
+            other
+        ))),
+    }
+}
+
+fn apply_workspace_scope(
+    query: &SpaceListQuery,
+    where_conditions: &mut Vec<&'static str>,
+    params: &mut std::collections::HashMap<String, serde_json::Value>,
+) -> Result<()> {
+    match query.workspace.as_deref().unwrap_or("personal") {
+        "team" => {
+            let team_id = query.team_id.as_deref().ok_or_else(|| {
+                AppError::Validation("team_id is required for team workspace".to_string())
+            })?;
+            where_conditions.push("workspace_kind = 'team'");
+            where_conditions.push("team_id = $team_id");
+            params.insert("team_id".to_string(), team_id.to_string().into());
+        }
+        "personal" | "" => {
+            where_conditions
+                .push("(!workspace_kind OR workspace_kind = NONE OR workspace_kind = 'personal')");
+        }
+        other => {
+            return Err(AppError::Validation(format!(
+                "unsupported workspace scope: {}",
+                other
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn apply_user_space_visibility_scope(
+    query: &SpaceListQuery,
+    user: &User,
+    where_conditions: &mut Vec<&'static str>,
+    params: &mut std::collections::HashMap<String, serde_json::Value>,
+) {
+    let user_id_raw = user.id.clone();
+    let user_id_bracketed = format!("user:{}", user_id_raw);
+    let user_id_plain = user_id_raw
+        .trim_matches(|c| c == '⟨' || c == '⟩')
+        .to_string();
+    let user_id_plain_prefixed = format!("user:{}", user_id_plain);
+
+    if query.workspace.as_deref() == Some("team") {
+        where_conditions.push(
+            "$team_id IN (
+                SELECT VALUE string::replace(type::string(team_id), 'team:', '')
+                FROM team_member
+                WHERE user_id IN [$user_id_raw, $user_id_bracketed, $user_id_plain_prefixed]
+                  AND status = 'active'
+            )",
+        );
+    } else {
+        where_conditions.push("(IF owner_id = NONE THEN '' ELSE type::string(owner_id) END) IN [$user_id_raw, $user_id_bracketed, $user_id_plain_prefixed]");
+    }
+
+    params.insert("user_id_raw".to_string(), user_id_raw.into());
+    params.insert("user_id_bracketed".to_string(), user_id_bracketed.into());
+    params.insert(
+        "user_id_plain_prefixed".to_string(),
+        user_id_plain_prefixed.into(),
+    );
+}
+
 fn member_space_ids_query() -> &'static str {
     r#"
         SELECT VALUE type::string(space_id)
@@ -1053,6 +1150,8 @@ mod tests {
             avatar_url: None,
             is_public: None,
             settings: None,
+            workspace: None,
+            team_id: None,
         };
 
         assert!(request.validate().is_err());
@@ -1067,6 +1166,8 @@ mod tests {
             avatar_url: None,
             is_public: None,
             settings: None,
+            workspace: None,
+            team_id: None,
         };
 
         assert!(valid_request.validate().is_ok());
@@ -1078,6 +1179,8 @@ mod tests {
             avatar_url: None,
             is_public: None,
             settings: None,
+            workspace: None,
+            team_id: None,
         };
 
         assert!(invalid_request.validate().is_err());
@@ -1096,6 +1199,115 @@ mod tests {
         let fields = create_space_optional_fields(&None, &Some("avatar".to_string()));
         assert!(!fields.contains("description: $description"));
         assert!(fields.contains("avatar_url: $avatar_url"));
+    }
+
+    #[test]
+    fn workspace_space_scope_personal_includes_legacy_personal_spaces() {
+        let query = SpaceListQuery {
+            page: None,
+            limit: None,
+            search: None,
+            owner_id: None,
+            workspace: Some("personal".to_string()),
+            team_id: None,
+            is_public: None,
+            sort: None,
+            order: None,
+        };
+        let mut conditions = Vec::new();
+        let mut params = std::collections::HashMap::new();
+
+        apply_workspace_scope(&query, &mut conditions, &mut params).unwrap();
+
+        let clause = conditions.join(" AND ");
+        assert!(clause.contains("!workspace_kind"));
+        assert!(clause.contains("workspace_kind = 'personal'"));
+        assert!(!params.contains_key("team_id"));
+    }
+
+    #[test]
+    fn workspace_space_scope_team_filters_by_team_id() {
+        let query = SpaceListQuery {
+            page: None,
+            limit: None,
+            search: None,
+            owner_id: None,
+            workspace: Some("team".to_string()),
+            team_id: Some("team-514".to_string()),
+            is_public: None,
+            sort: None,
+            order: None,
+        };
+        let mut conditions = Vec::new();
+        let mut params = std::collections::HashMap::new();
+
+        apply_workspace_scope(&query, &mut conditions, &mut params).unwrap();
+
+        let clause = conditions.join(" AND ");
+        assert!(clause.contains("workspace_kind = 'team'"));
+        assert!(clause.contains("team_id = $team_id"));
+        assert_eq!(params.get("team_id").and_then(|v| v.as_str()), Some("team-514"));
+    }
+
+    #[test]
+    fn create_space_workspace_values_require_team_id_for_team_spaces() {
+        let request = CreateSpaceRequest {
+            name: "Team Space".to_string(),
+            slug: "team-space".to_string(),
+            description: None,
+            avatar_url: None,
+            is_public: None,
+            settings: None,
+            workspace: Some("team".to_string()),
+            team_id: Some("team-514".to_string()),
+        };
+
+        let values = create_space_workspace_values(&request).unwrap();
+
+        assert_eq!(values.workspace_kind, "team");
+        assert_eq!(values.team_id.as_deref(), Some("team-514"));
+
+        let missing_team_id = CreateSpaceRequest {
+            team_id: None,
+            ..request
+        };
+
+        assert!(create_space_workspace_values(&missing_team_id).is_err());
+    }
+
+    #[test]
+    fn team_workspace_visibility_uses_team_membership_not_space_owner() {
+        let query = SpaceListQuery {
+            page: None,
+            limit: None,
+            search: None,
+            owner_id: None,
+            workspace: Some("team".to_string()),
+            team_id: Some("team-514".to_string()),
+            is_public: None,
+            sort: None,
+            order: None,
+        };
+        let user = User {
+            id: "user-1".to_string(),
+            email: "user-1@example.com".to_string(),
+            roles: vec![],
+            permissions: vec![],
+            profile: None,
+        };
+        let mut conditions = Vec::new();
+        let mut params = std::collections::HashMap::new();
+
+        apply_user_space_visibility_scope(&query, &user, &mut conditions, &mut params);
+
+        let clause = conditions.join(" AND ");
+        assert!(clause.contains("FROM team_member"));
+        assert!(clause.contains("status = 'active'"));
+        assert!(!clause.contains("owner_id"));
+        assert_eq!(
+            params.get("user_id_raw").and_then(|v| v.as_str()),
+            Some("user-1")
+        );
     }
 
     #[test]

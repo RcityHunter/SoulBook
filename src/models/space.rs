@@ -140,6 +140,8 @@ pub struct CreateSpaceRequest {
     pub avatar_url: Option<String>,
     pub is_public: Option<bool>,
     pub settings: Option<SpaceSettings>,
+    pub workspace: Option<String>,
+    pub team_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate)]
@@ -214,6 +216,8 @@ pub struct SpaceListQuery {
     pub limit: Option<u32>,
     pub search: Option<String>,
     pub owner_id: Option<String>,
+    pub workspace: Option<String>,
+    pub team_id: Option<String>,
     pub is_public: Option<bool>,
     pub sort: Option<String>,  // "name", "created_at", "updated_at"
     pub order: Option<String>, // "asc", "desc"
@@ -226,6 +230,8 @@ impl Default for SpaceListQuery {
             limit: Some(20),
             search: None,
             owner_id: None,
+            workspace: None,
+            team_id: None,
             is_public: None,
             sort: Some("updated_at".to_string()),
             order: Some("desc".to_string()),

@@ -217,6 +217,8 @@ mod tests {
             avatar_url: None,
             is_public: None,
             settings: None,
+            workspace: None,
+            team_id: None,
         };
 
         // 验证应该失败
@@ -236,6 +238,8 @@ mod tests {
                 avatar_url: None,
                 is_public: None,
                 settings: None,
+                workspace: None,
+                team_id: None,
             };
             assert!(request.validate().is_ok(), "Should be valid: {}", slug);
         }
@@ -248,6 +252,8 @@ mod tests {
                 avatar_url: None,
                 is_public: None,
                 settings: None,
+                workspace: None,
+                team_id: None,
             };
             assert!(request.validate().is_err(), "Should be invalid: {}", slug);
         }
