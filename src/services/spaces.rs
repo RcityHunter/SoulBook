@@ -966,11 +966,11 @@ struct SpaceStatsQueries {
 
 fn space_stats_queries() -> SpaceStatsQueries {
     SpaceStatsQueries {
-        document_count: "SELECT count() FROM document WHERE space_id = type::record($space_id) AND is_deleted = false",
-        public_document_count: "SELECT count() FROM document WHERE space_id = type::record($space_id) AND is_deleted = false AND is_public = true",
-        member_count: "SELECT count() FROM space_member WHERE space_id = type::record($space_id) AND status = 'accepted'",
-        tag_count: "SELECT count() FROM tag WHERE space_id = type::record($space_id)",
-        comment_count: "SELECT count() FROM comment WHERE document_id IN (SELECT id FROM document WHERE space_id = type::record($space_id) AND is_deleted = false)",
+        document_count: "SELECT count() AS count FROM document WHERE space_id = type::record($space_id) AND is_deleted = false GROUP ALL",
+        public_document_count: "SELECT count() AS count FROM document WHERE space_id = type::record($space_id) AND is_deleted = false AND is_public = true GROUP ALL",
+        member_count: "SELECT count() AS count FROM space_member WHERE space_id = type::record($space_id) AND status = 'accepted' GROUP ALL",
+        tag_count: "SELECT count() AS count FROM tag WHERE space_id = type::record($space_id) GROUP ALL",
+        comment_count: "SELECT count() AS count FROM comment WHERE document_id IN (SELECT id FROM document WHERE space_id = type::record($space_id) AND is_deleted = false) GROUP ALL",
         view_count: "SELECT math::sum(view_count) AS total_views FROM document WHERE space_id = type::record($space_id) AND is_deleted = false",
         last_activity: "SELECT updated_at FROM document WHERE space_id = type::record($space_id) AND is_deleted = false ORDER BY updated_at DESC LIMIT 1",
     }
@@ -1152,6 +1152,23 @@ mod tests {
         for query in queries {
             assert!(query.contains("type::record($space_id)"));
             assert!(!query.contains("space_id = $space_id"));
+        }
+    }
+
+    #[test]
+    fn space_stats_count_queries_return_named_grouped_counts() {
+        let queries = space_stats_queries();
+        let count_queries = [
+            queries.document_count,
+            queries.public_document_count,
+            queries.member_count,
+            queries.tag_count,
+            queries.comment_count,
+        ];
+
+        for query in count_queries {
+            assert!(query.contains("count() AS count"));
+            assert!(query.contains("GROUP ALL"));
         }
     }
 
