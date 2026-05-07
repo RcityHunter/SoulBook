@@ -4,13 +4,20 @@ use axum::{
     response::Json,
     routing::{delete, get, post, put},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use surrealdb::types::RecordId as Thing;
 use tracing::warn;
 
-use crate::{AppState, error::Result, services::auth::User};
+use crate::{
+    AppState,
+    error::Result,
+    services::{
+        auth::User,
+        git_sync::{GitSyncInput, GitSyncService},
+    },
+};
 
 pub fn router() -> Router {
     Router::new()
@@ -177,39 +184,80 @@ async fn trigger_sync(
 ) -> Result<Json<Value>> {
     let db = &app_state.db.client;
     let now = chrono::Utc::now().to_rfc3339();
+    let repo = load_git_repo(&app_state, &id).await?;
+    let token = std::env::var("GITHUB_TOKEN").map_err(|_| {
+        crate::error::ApiError::BadRequest(
+            "GitHub sync is not configured: missing GITHUB_TOKEN".to_string(),
+        )
+    })?;
 
-    // Record sync log
-    if let Err(e) = db
-        .query(
-        "CREATE git_sync_log SET
-            repo_id = $repo_id,
-            triggered_by = $uid,
-            direction = 'soulbook_to_github',
-            status = 'pending',
-            created_at = $now",
+    let service = GitSyncService::new(app_state.db.clone());
+    let space = app_state
+        .space_service
+        .get_space_by_slug(&repo.space_slug, Some(&user))
+        .await?;
+    let sync_result = service
+        .sync_space_to_github(GitSyncInput {
+            github_url: repo.github_url.clone(),
+            branch: repo.branch.clone(),
+            path_prefix: repo.path_prefix.clone(),
+            space_id: space.id.clone(),
+            token,
+        })
+        .await;
+
+    let (status, message, files_changed, commit_sha) = match sync_result {
+        Ok(result) => (
+            "success",
+            format!("Synced {} file(s) to GitHub", result.files_changed),
+            result.files_changed as i64,
+            result.commit_sha,
+        ),
+        Err(error) => ("failed", error, 0, None),
+    };
+
+    record_sync_log(
+        &app_state,
+        &id,
+        &user.id,
+        status,
+        &message,
+        files_changed,
+        commit_sha.as_deref(),
+        &now,
     )
-        .bind(("repo_id", format!("git_repo:{}", id)))
-        .bind(("uid", &user.id))
-        .bind(("now", &now))
-        .await
-    {
-        warn!("failed to create git sync log for {}: {}", id, e);
-    }
+    .await;
 
-    // Update repo last_synced_at
-    if let Err(e) = db
-        .query("UPDATE $id SET last_synced_at = $now, updated_at = $now")
-        .bind(("id", Thing::new("git_repo", id.clone())))
-        .bind(("now", &now))
-        .await
-    {
-        warn!("failed to update git sync timestamp for {}: {}", id, e);
-    }
+    if status == "success" {
+        if let Err(e) = db
+            .query("UPDATE $id SET last_synced_at = $now, updated_at = $now, status = 'connected'")
+            .bind(("id", Thing::new("git_repo", id.clone())))
+            .bind(("now", &now))
+            .await
+        {
+            warn!("failed to update git sync timestamp for {}: {}", id, e);
+        }
 
-    Ok(Json(json!({
-        "success": true,
-        "data": { "message": "同步任务已提交，请稍后查看日志" }
-    })))
+        Ok(Json(json!({
+            "success": true,
+            "data": {
+                "message": message,
+                "files_changed": files_changed,
+                "commit_sha": commit_sha
+            }
+        })))
+    } else {
+        if let Err(e) = db
+            .query("UPDATE $id SET status = 'error', updated_at = $now")
+            .bind(("id", Thing::new("git_repo", id.clone())))
+            .bind(("now", &now))
+            .await
+        {
+            warn!("failed to update git sync error status for {}: {}", id, e);
+        }
+
+        Err(crate::error::ApiError::Internal(anyhow::anyhow!(message)))
+    }
 }
 
 async fn sync_logs(
@@ -239,6 +287,79 @@ async fn sync_logs(
     };
 
     Ok(Json(json!({ "success": true, "data": { "items": items } })))
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct GitRepoRecord {
+    #[serde(default)]
+    id: Option<Value>,
+    space_slug: String,
+    github_url: String,
+    #[serde(default = "default_main_branch")]
+    branch: String,
+    #[serde(default = "default_path_prefix")]
+    path_prefix: String,
+}
+
+impl GitRepoRecord {
+    fn is_valid(&self) -> bool {
+        !self.github_url.trim().is_empty() && !self.space_slug.trim().is_empty()
+    }
+}
+
+fn default_main_branch() -> String {
+    "main".to_string()
+}
+
+fn default_path_prefix() -> String {
+    "docs/".to_string()
+}
+
+async fn load_git_repo(app_state: &AppState, id: &str) -> Result<GitRepoRecord> {
+    let db = &app_state.db.client;
+    let item: Option<GitRepoRecord> = db
+        .select(("git_repo", id))
+        .await
+        .map_err(|e| crate::error::ApiError::DatabaseError(e.to_string()))?;
+
+    item.filter(GitRepoRecord::is_valid)
+        .ok_or_else(|| crate::error::ApiError::NotFound("Repository not found".to_string()))
+}
+
+async fn record_sync_log(
+    app_state: &AppState,
+    id: &str,
+    user_id: &str,
+    status: &str,
+    message: &str,
+    files_changed: i64,
+    commit_sha: Option<&str>,
+    now: &str,
+) {
+    let db = &app_state.db.client;
+    if let Err(e) = db
+        .query(
+            "CREATE git_sync_log SET
+                repo_id = $repo_id,
+                triggered_by = $uid,
+                direction = 'soulbook_to_github',
+                status = $status,
+                message = $message,
+                files_changed = $files_changed,
+                commit_sha = $commit_sha,
+                created_at = $now",
+        )
+        .bind(("repo_id", format!("git_repo:{}", id)))
+        .bind(("uid", user_id))
+        .bind(("status", status))
+        .bind(("message", message))
+        .bind(("files_changed", files_changed))
+        .bind(("commit_sha", commit_sha))
+        .bind(("now", now))
+        .await
+    {
+        warn!("failed to create git sync log for {}: {}", id, e);
+    }
 }
 
 fn merge_git_repo_payload(id: &str, body: &Value, updated_at: &str) -> Value {

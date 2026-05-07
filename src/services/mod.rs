@@ -3,6 +3,7 @@ pub mod comments;
 pub mod database;
 pub mod documents;
 pub mod file_upload;
+pub mod git_sync;
 pub mod notification;
 pub mod publication;
 pub mod search;
