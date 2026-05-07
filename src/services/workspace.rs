@@ -54,6 +54,14 @@ fn team_projection_query() -> &'static str {
      LIMIT 1"
 }
 
+fn workspace_schema_sql() -> &'static str {
+    "DEFINE TABLE IF NOT EXISTS team SCHEMALESS;
+     DEFINE INDEX IF NOT EXISTS team_slug_unique_idx ON TABLE team COLUMNS slug UNIQUE;
+     DEFINE TABLE IF NOT EXISTS team_member SCHEMALESS;
+     DEFINE INDEX IF NOT EXISTS team_member_user_idx ON TABLE team_member COLUMNS user_id;
+     DEFINE INDEX IF NOT EXISTS team_member_team_idx ON TABLE team_member COLUMNS team_id;"
+}
+
 pub struct WorkspaceService {
     db: Arc<Database>,
 }
@@ -61,6 +69,18 @@ pub struct WorkspaceService {
 impl WorkspaceService {
     pub fn new(db: Arc<Database>) -> Self {
         Self { db }
+    }
+
+    pub async fn ensure_schema(&self) -> Result<()> {
+        self.db
+            .client
+            .query(workspace_schema_sql())
+            .await
+            .map_err(|e| {
+                error!("Failed to ensure workspace schema: {}", e);
+                AppError::Database(e)
+            })?;
+        Ok(())
     }
 
     pub async fn list_workspaces(&self, user: &User) -> Result<WorkspacesResponse> {
@@ -321,5 +341,12 @@ mod tests {
             create_team_optional_fields(&Some("desc".to_string())),
             "description: $description,"
         );
+    }
+
+    #[test]
+    fn schema_defines_workspace_tables() {
+        let schema = workspace_schema_sql();
+        assert!(schema.contains("DEFINE TABLE IF NOT EXISTS team"));
+        assert!(schema.contains("DEFINE TABLE IF NOT EXISTS team_member"));
     }
 }

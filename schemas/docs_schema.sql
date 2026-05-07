@@ -505,6 +505,17 @@ DEFINE INDEX space_invitation_inviter_idx ON space_invitation COLUMNS invited_by
 DEFINE INDEX space_invitation_email_idx ON space_invitation COLUMNS email;
 
 -- =====================================
+-- 工作区 / 团队系统
+-- =====================================
+
+DEFINE TABLE team SCHEMALESS;
+DEFINE INDEX team_slug_unique_idx ON team COLUMNS slug UNIQUE;
+
+DEFINE TABLE team_member SCHEMALESS;
+DEFINE INDEX team_member_user_idx ON team_member COLUMNS user_id;
+DEFINE INDEX team_member_team_idx ON team_member COLUMNS team_id;
+
+-- =====================================
 -- 初始数据插入
 -- =====================================
 

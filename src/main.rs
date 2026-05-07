@@ -136,6 +136,7 @@ async fn main() -> anyhow::Result<()> {
     let space_service = Arc::new(SpaceService::new(shared_db.clone()));
     let space_member_service = Arc::new(SpaceMemberService::new(shared_db.clone(), config.clone()));
     let workspace_service = Arc::new(WorkspaceService::new(shared_db.clone()));
+    workspace_service.ensure_schema().await?;
     let file_upload_service = Arc::new(FileUploadService::new(
         shared_db.clone(),
         auth_service.clone(),
