@@ -256,8 +256,12 @@ async fn trigger_sync(
             warn!("failed to update git sync error status for {}: {}", id, e);
         }
 
-        Err(crate::error::ApiError::Internal(anyhow::anyhow!(message)))
+        Err(sync_failure_error(message))
     }
+}
+
+fn sync_failure_error(message: String) -> crate::error::ApiError {
+    crate::error::ApiError::External(message)
 }
 
 async fn sync_logs(
@@ -405,5 +409,17 @@ mod tests {
         assert_eq!(merged["auto_sync"], true);
         assert_eq!(merged["path_prefix"], "docs/");
         assert_eq!(merged["updated_at"], "2026-04-29T00:00:00Z");
+    }
+
+    #[test]
+    fn sync_failure_uses_external_error_so_client_gets_message() {
+        let error = sync_failure_error("GitHub put file failed".to_string());
+
+        match error {
+            crate::error::ApiError::External(message) => {
+                assert_eq!(message, "GitHub put file failed");
+            }
+            other => panic!("expected External error, got {other:?}"),
+        }
     }
 }
