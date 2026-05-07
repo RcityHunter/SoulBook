@@ -59,14 +59,16 @@ impl TagService {
             .await
             .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
 
-        let created: Vec<Tag> = created_response
+        let created: Vec<serde_json::Value> = created_response
             .take(0)
             .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
 
-        created
-            .into_iter()
-            .next()
-            .ok_or_else(|| ApiError::InternalServerError("Failed to create tag".to_string()))
+        let tag_id = created
+            .first()
+            .and_then(extract_created_tag_id)
+            .ok_or_else(|| ApiError::InternalServerError("Failed to create tag".to_string()))?;
+
+        self.get_tag(&tag_id).await
     }
 
     pub async fn get_tag(&self, tag_id: &str) -> Result<Tag, ApiError> {
@@ -534,6 +536,12 @@ fn create_tag_sql(space_id: &Option<String>) -> &'static str {
     }
 }
 
+fn extract_created_tag_id(value: &serde_json::Value) -> Option<String> {
+    let raw_id = value.get("id")?.as_str()?;
+
+    Some(raw_id.strip_prefix("tag:").unwrap_or(raw_id).to_string())
+}
+
 #[derive(Debug, serde::Serialize)]
 pub struct TagStatistics {
     pub total_tags: i64,
@@ -551,7 +559,7 @@ mod tests {
         let sql = create_tag_sql(&None);
 
         assert!(sql.contains("CREATE tag CONTENT"));
-        assert!(!sql.contains("id:"));
+        assert!(!sql.contains("\n            id:"));
         assert!(!sql.contains("space_id: $space_id"));
     }
 
@@ -560,6 +568,13 @@ mod tests {
         let sql = create_tag_sql(&Some("space-id".to_string()));
 
         assert!(sql.contains("space_id: $space_id"));
-        assert!(!sql.contains("id:"));
+        assert!(!sql.contains("\n            id:"));
+    }
+
+    #[test]
+    fn extract_created_tag_id_accepts_surreal_string_id() {
+        let value = serde_json::json!({ "id": "tag:abc123" });
+
+        assert_eq!(extract_created_tag_id(&value), Some("abc123".to_string()));
     }
 }
