@@ -516,7 +516,7 @@ fn tag_list_sql(space_id: Option<&str>) -> &'static str {
     if space_id.is_some() {
         "SELECT * FROM tag WHERE space_id = $space_id ORDER BY usage_count DESC, name ASC LIMIT $limit START $offset"
     } else {
-        "SELECT * FROM tag WHERE (space_id = NONE OR space_id = NULL) ORDER BY usage_count DESC, name ASC LIMIT $limit START $offset"
+        "SELECT * FROM tag WHERE !space_id ORDER BY usage_count DESC, name ASC LIMIT $limit START $offset"
     }
 }
 
@@ -524,7 +524,7 @@ fn popular_tags_sql(space_id: Option<&str>) -> &'static str {
     if space_id.is_some() {
         "SELECT * FROM tag WHERE space_id = $space_id AND usage_count > 0 ORDER BY usage_count DESC LIMIT $limit"
     } else {
-        "SELECT * FROM tag WHERE (space_id = NONE OR space_id = NULL) AND usage_count > 0 ORDER BY usage_count DESC LIMIT $limit"
+        "SELECT * FROM tag WHERE !space_id AND usage_count > 0 ORDER BY usage_count DESC LIMIT $limit"
     }
 }
 
@@ -532,7 +532,7 @@ fn search_tags_sql(space_id: Option<&str>) -> &'static str {
     if space_id.is_some() {
         "SELECT * FROM tag WHERE space_id = $space_id AND (name CONTAINSTEXT $query OR description CONTAINSTEXT $query) ORDER BY usage_count DESC LIMIT $limit"
     } else {
-        "SELECT * FROM tag WHERE (space_id = NONE OR space_id = NULL) AND (name CONTAINSTEXT $query OR description CONTAINSTEXT $query) ORDER BY usage_count DESC LIMIT $limit"
+        "SELECT * FROM tag WHERE !space_id AND (name CONTAINSTEXT $query OR description CONTAINSTEXT $query) ORDER BY usage_count DESC LIMIT $limit"
     }
 }
 
@@ -540,7 +540,7 @@ fn tag_total_count_sql(space_id: Option<&str>) -> &'static str {
     if space_id.is_some() {
         "SELECT count() as total FROM tag WHERE space_id = $space_id GROUP ALL"
     } else {
-        "SELECT count() as total FROM tag WHERE (space_id = NONE OR space_id = NULL) GROUP ALL"
+        "SELECT count() as total FROM tag WHERE !space_id GROUP ALL"
     }
 }
 
@@ -548,7 +548,7 @@ fn tag_used_count_sql(space_id: Option<&str>) -> &'static str {
     if space_id.is_some() {
         "SELECT count() as used FROM tag WHERE space_id = $space_id AND usage_count > 0 GROUP ALL"
     } else {
-        "SELECT count() as used FROM tag WHERE (space_id = NONE OR space_id = NULL) AND usage_count > 0 GROUP ALL"
+        "SELECT count() as used FROM tag WHERE !space_id AND usage_count > 0 GROUP ALL"
     }
 }
 
@@ -556,7 +556,7 @@ fn tag_exists_sql(space_id: &Option<String>) -> &'static str {
     if space_id.is_some() {
         "SELECT count() FROM tag WHERE space_id = $space_id AND name = $name GROUP ALL"
     } else {
-        "SELECT count() FROM tag WHERE (space_id = NONE OR space_id = NULL) AND name = $name GROUP ALL"
+        "SELECT count() FROM tag WHERE !space_id AND name = $name GROUP ALL"
     }
 }
 
@@ -596,7 +596,7 @@ mod tests {
     }
 
     #[test]
-    fn global_tag_queries_match_missing_or_null_space_id() {
+    fn global_tag_queries_match_surrealdb_falsy_space_id() {
         let queries = [
             tag_list_sql(None),
             popular_tags_sql(None),
@@ -607,8 +607,10 @@ mod tests {
         ];
 
         for query in queries {
-            assert!(query.contains("(space_id = NONE OR space_id = NULL)"));
+            assert!(query.contains("!space_id"));
             assert!(!query.contains("space_id IS NULL"));
+            assert!(!query.contains("space_id = NULL"));
+            assert!(!query.contains("space_id = NONE"));
         }
     }
 
