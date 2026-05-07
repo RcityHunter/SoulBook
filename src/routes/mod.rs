@@ -25,6 +25,7 @@ pub mod templates;
 pub mod tool_configs;
 pub mod vectors;
 pub mod versions;
+pub mod workspaces;
 
 #[cfg(feature = "installer")]
 pub mod installer;

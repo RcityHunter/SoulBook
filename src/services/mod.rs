@@ -11,3 +11,4 @@ pub mod spaces;
 pub mod tags;
 pub mod vector;
 pub mod versions;
+pub mod workspace;

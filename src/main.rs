@@ -1,12 +1,12 @@
 use axum::{
+    Extension,
     extract::Query,
     http::{
-        header::{COOKIE, SET_COOKIE},
         HeaderMap,
+        header::{COOKIE, SET_COOKIE},
     },
     response::{Html, IntoResponse, Response},
-    routing::{delete, get, post, Router},
-    Extension,
+    routing::{Router, delete, get, post},
 };
 use chrono::{Duration as ChronoDuration, Utc};
 use serde::Deserialize;
@@ -14,7 +14,7 @@ use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
 };
-use tokio::time::{interval, Duration};
+use tokio::time::{Duration, interval};
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tracing::{info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -37,6 +37,7 @@ use crate::{
         documents::DocumentService, file_upload::FileUploadService,
         publication::PublicationService, search::SearchService, space_member::SpaceMemberService,
         spaces::SpaceService, tags::TagService, versions::VersionService,
+        workspace::WorkspaceService,
     },
     state::AppState,
     utils::markdown::MarkdownProcessor,
@@ -134,6 +135,7 @@ async fn main() -> anyhow::Result<()> {
     // 创建业务服务
     let space_service = Arc::new(SpaceService::new(shared_db.clone()));
     let space_member_service = Arc::new(SpaceMemberService::new(shared_db.clone(), config.clone()));
+    let workspace_service = Arc::new(WorkspaceService::new(shared_db.clone()));
     let file_upload_service = Arc::new(FileUploadService::new(
         shared_db.clone(),
         auth_service.clone(),
@@ -172,6 +174,7 @@ async fn main() -> anyhow::Result<()> {
         auth_service: auth_service.clone(),
         space_service: space_service.clone(),
         space_member_service: space_member_service.clone(),
+        workspace_service: workspace_service.clone(),
         file_upload_service: file_upload_service.clone(),
         tag_service: tag_service.clone(),
         document_service: document_service.clone(),
@@ -197,6 +200,7 @@ async fn main() -> anyhow::Result<()> {
         .nest("/api/docs/auth", routes::auth::router())
         .nest("/api/docs/spaces", routes::spaces::router())
         .nest("/api/docs/spaces", routes::space_members::router())
+        .nest("/api/docs/workspaces", routes::workspaces::router())
         .nest("/api/docs/files", routes::files::router())
         .nest("/api/docs/tags", routes::tags::router())
         .nest("/api/docs/documents", routes::documents::router())
@@ -853,12 +857,14 @@ mod tests {
 
         assert!(!bridge.contains(app_jwt));
         assert!(bridge.split('.').count() < 3);
-        assert!(jsonwebtoken::decode::<serde_json::Value>(
-            &bridge,
-            &jsonwebtoken::DecodingKey::from_secret("test-secret".as_ref()),
-            &jsonwebtoken::Validation::default(),
-        )
-        .is_err());
+        assert!(
+            jsonwebtoken::decode::<serde_json::Value>(
+                &bridge,
+                &jsonwebtoken::DecodingKey::from_secret("test-secret".as_ref()),
+                &jsonwebtoken::Validation::default(),
+            )
+            .is_err()
+        );
     }
 
     #[test]

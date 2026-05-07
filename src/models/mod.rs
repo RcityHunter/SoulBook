@@ -9,3 +9,4 @@ pub mod space;
 pub mod space_member;
 pub mod tag;
 pub mod version;
+pub mod workspace;
