@@ -972,7 +972,7 @@ fn space_stats_queries() -> SpaceStatsQueries {
         tag_count: "SELECT count() AS count FROM tag WHERE space_id = type::record($space_id) GROUP ALL",
         comment_count: "SELECT count() AS count FROM comment WHERE document_id IN (SELECT id FROM document WHERE space_id = type::record($space_id) AND is_deleted = false) GROUP ALL",
         view_count: "SELECT math::sum(view_count) AS total_views FROM document WHERE space_id = type::record($space_id) AND is_deleted = false",
-        last_activity: "SELECT updated_at FROM document WHERE space_id = type::record($space_id) AND is_deleted = false ORDER BY updated_at DESC LIMIT 1",
+        last_activity: "SELECT type::string(updated_at) AS updated_at FROM document WHERE space_id = type::record($space_id) AND is_deleted = false ORDER BY updated_at DESC LIMIT 1",
     }
 }
 
@@ -1170,6 +1170,13 @@ mod tests {
             assert!(query.contains("count() AS count"));
             assert!(query.contains("GROUP ALL"));
         }
+    }
+
+    #[test]
+    fn space_stats_last_activity_returns_string_datetime() {
+        let queries = space_stats_queries();
+
+        assert!(queries.last_activity.contains("type::string(updated_at) AS updated_at"));
     }
 
     #[test]
