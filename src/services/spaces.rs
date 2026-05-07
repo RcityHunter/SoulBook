@@ -725,15 +725,20 @@ impl SpaceService {
             .map_err(|e| AppError::Database(e))?
             .take((0, "count"))?;
 
-        // 查询总浏览量
-        let view_count: Option<u32> = self
+        // 查询总浏览量。SurrealDB 3 的 math::sum expects array<number>，
+        // 对字段直接聚合会报类型错误，所以这里读取行后在 Rust 侧求和。
+        let view_rows: Vec<Value> = self
             .db
             .client
             .query(queries.view_count)
             .bind(("space_id", format!("space:{}", space_id)))
             .await
             .map_err(|e| AppError::Database(e))?
-            .take((0, "total_views"))?;
+            .take(0)?;
+        let view_count = view_rows
+            .iter()
+            .filter_map(|row| row.get("view_count").and_then(Value::as_u64))
+            .sum::<u64>() as u32;
 
         // 查询最后活动时间
         let last_activity: Option<String> = self
@@ -755,7 +760,7 @@ impl SpaceService {
             member_count: member_count.unwrap_or(0),
             tag_count: tag_count.unwrap_or(0),
             comment_count: comment_count.unwrap_or(0),
-            view_count: view_count.unwrap_or(0),
+            view_count,
             last_activity,
         })
     }
@@ -971,7 +976,7 @@ fn space_stats_queries() -> SpaceStatsQueries {
         member_count: "SELECT count() AS count FROM space_member WHERE space_id = type::record($space_id) AND status = 'accepted' GROUP ALL",
         tag_count: "SELECT count() AS count FROM tag WHERE space_id = type::record($space_id) GROUP ALL",
         comment_count: "SELECT count() AS count FROM comment WHERE document_id IN (SELECT id FROM document WHERE space_id = type::record($space_id) AND is_deleted = false) GROUP ALL",
-        view_count: "SELECT math::sum(view_count) AS total_views FROM document WHERE space_id = type::record($space_id) AND is_deleted = false",
+        view_count: "SELECT view_count FROM document WHERE space_id = type::record($space_id) AND is_deleted = false",
         last_activity: "SELECT type::string(updated_at) AS updated_at FROM document WHERE space_id = type::record($space_id) AND is_deleted = false ORDER BY updated_at DESC LIMIT 1",
     }
 }
@@ -1177,6 +1182,17 @@ mod tests {
         let queries = space_stats_queries();
 
         assert!(queries.last_activity.contains("type::string(updated_at) AS updated_at"));
+    }
+
+    #[test]
+    fn space_stats_view_count_query_returns_rows_for_rust_sum() {
+        let queries = space_stats_queries();
+
+        assert_eq!(
+            queries.view_count,
+            "SELECT view_count FROM document WHERE space_id = type::record($space_id) AND is_deleted = false"
+        );
+        assert!(!queries.view_count.contains("math::sum"));
     }
 
     #[test]
