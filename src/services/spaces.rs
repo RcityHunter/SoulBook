@@ -674,11 +674,14 @@ impl SpaceService {
 
     /// 获取空间统计信息
     pub async fn get_space_stats(&self, space_id: &str) -> Result<SpaceStats> {
+        let space_id = sanitize_space_id_for_query(space_id)?;
+        let queries = space_stats_queries();
+
         // 查询文档数量
         let doc_count: Option<u32> = self
             .db
             .client
-            .query("SELECT count() FROM document WHERE space_id = $space_id")
+            .query(queries.document_count)
             .bind(("space_id", format!("space:{}", space_id)))
             .await
             .map_err(|e| AppError::Database(e))?
@@ -688,31 +691,55 @@ impl SpaceService {
         let public_doc_count: Option<u32> = self
             .db
             .client
-            .query("SELECT count() FROM document WHERE space_id = $space_id AND is_public = true")
+            .query(queries.public_document_count)
+            .bind(("space_id", format!("space:{}", space_id)))
+            .await
+            .map_err(|e| AppError::Database(e))?
+            .take((0, "count"))?;
+
+        let member_count: Option<u32> = self
+            .db
+            .client
+            .query(queries.member_count)
+            .bind(("space_id", format!("space:{}", space_id)))
+            .await
+            .map_err(|e| AppError::Database(e))?
+            .take((0, "count"))?;
+
+        let tag_count: Option<u32> = self
+            .db
+            .client
+            .query(queries.tag_count)
             .bind(("space_id", format!("space:{}", space_id)))
             .await
             .map_err(|e| AppError::Database(e))?
             .take((0, "count"))?;
 
         // 查询评论数量
-        let comment_count: Option<u32> = self.db.client
-            .query("SELECT count() FROM comment WHERE document_id IN (SELECT id FROM document WHERE space_id = $space_id)")
+        let comment_count: Option<u32> = self
+            .db
+            .client
+            .query(queries.comment_count)
             .bind(("space_id", format!("space:{}", space_id)))
             .await
             .map_err(|e| AppError::Database(e))?
             .take((0, "count"))?;
 
         // 查询总浏览量
-        let view_count: Option<u32> = self.db.client
-            .query("SELECT math::sum(view_count) AS total_views FROM document WHERE space_id = $space_id")
+        let view_count: Option<u32> = self
+            .db
+            .client
+            .query(queries.view_count)
             .bind(("space_id", format!("space:{}", space_id)))
             .await
             .map_err(|e| AppError::Database(e))?
             .take((0, "total_views"))?;
 
         // 查询最后活动时间
-        let last_activity: Option<String> = self.db.client
-            .query("SELECT updated_at FROM document WHERE space_id = $space_id ORDER BY updated_at DESC LIMIT 1")
+        let last_activity: Option<String> = self
+            .db
+            .client
+            .query(queries.last_activity)
             .bind(("space_id", format!("space:{}", space_id)))
             .await
             .map_err(|e| AppError::Database(e))?
@@ -725,6 +752,8 @@ impl SpaceService {
         Ok(SpaceStats {
             document_count: doc_count.unwrap_or(0),
             public_document_count: public_doc_count.unwrap_or(0),
+            member_count: member_count.unwrap_or(0),
+            tag_count: tag_count.unwrap_or(0),
             comment_count: comment_count.unwrap_or(0),
             view_count: view_count.unwrap_or(0),
             last_activity,
@@ -925,8 +954,35 @@ fn member_space_lookup_where_clause() -> &'static str {
     "(type::string(id) = $space_id OR string::replace(type::string(id), 'space:', '') = $space_key OR slug = $space_key)"
 }
 
+struct SpaceStatsQueries {
+    document_count: &'static str,
+    public_document_count: &'static str,
+    member_count: &'static str,
+    tag_count: &'static str,
+    comment_count: &'static str,
+    view_count: &'static str,
+    last_activity: &'static str,
+}
+
+fn space_stats_queries() -> SpaceStatsQueries {
+    SpaceStatsQueries {
+        document_count: "SELECT count() FROM document WHERE space_id = type::record($space_id) AND is_deleted = false",
+        public_document_count: "SELECT count() FROM document WHERE space_id = type::record($space_id) AND is_deleted = false AND is_public = true",
+        member_count: "SELECT count() FROM space_member WHERE space_id = type::record($space_id) AND status = 'accepted'",
+        tag_count: "SELECT count() FROM tag WHERE space_id = type::record($space_id)",
+        comment_count: "SELECT count() FROM comment WHERE document_id IN (SELECT id FROM document WHERE space_id = type::record($space_id) AND is_deleted = false)",
+        view_count: "SELECT math::sum(view_count) AS total_views FROM document WHERE space_id = type::record($space_id) AND is_deleted = false",
+        last_activity: "SELECT updated_at FROM document WHERE space_id = type::record($space_id) AND is_deleted = false ORDER BY updated_at DESC LIMIT 1",
+    }
+}
+
 fn space_identity_key(space: &Space) -> Option<String> {
-    if let Some(id) = space.id.as_ref().map(|id| id.trim()).filter(|id| !id.is_empty()) {
+    if let Some(id) = space
+        .id
+        .as_ref()
+        .map(|id| id.trim())
+        .filter(|id| !id.is_empty())
+    {
         return Some(format!("id:{id}"));
     }
 
@@ -1078,5 +1134,32 @@ mod tests {
 
         space.id = Some("space-id".to_string());
         assert_eq!(space_identity_key(&space), Some("id:space-id".to_string()));
+    }
+
+    #[test]
+    fn space_stats_queries_match_record_space_ids() {
+        let queries = space_stats_queries();
+        let queries = [
+            queries.document_count,
+            queries.public_document_count,
+            queries.member_count,
+            queries.tag_count,
+            queries.comment_count,
+            queries.view_count,
+            queries.last_activity,
+        ];
+
+        for query in queries {
+            assert!(query.contains("type::record($space_id)"));
+            assert!(!query.contains("space_id = $space_id"));
+        }
+    }
+
+    #[test]
+    fn space_stats_response_includes_member_and_tag_counts() {
+        let stats = SpaceStats::default();
+
+        assert_eq!(stats.member_count, 0);
+        assert_eq!(stats.tag_count, 0);
     }
 }

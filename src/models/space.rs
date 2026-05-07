@@ -178,6 +178,8 @@ pub struct SpaceResponse {
 pub struct SpaceStats {
     pub document_count: u32,
     pub public_document_count: u32,
+    pub member_count: u32,
+    pub tag_count: u32,
     pub comment_count: u32,
     pub view_count: u32,
     pub last_activity: Option<DateTime<Utc>>,
@@ -188,6 +190,8 @@ impl Default for SpaceStats {
         Self {
             document_count: 0,
             public_document_count: 0,
+            member_count: 0,
+            tag_count: 0,
             comment_count: 0,
             view_count: 0,
             last_activity: None,
